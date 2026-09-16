@@ -1,0 +1,5 @@
+pulso-transmi[ml] @ git+https://github.com/uexternadojz/pulso-transmi-sdk.git
+matplotlib>=3.8
+seaborn>=0.13
+jupyter
+nbformat
