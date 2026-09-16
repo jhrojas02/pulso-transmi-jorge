@@ -18,6 +18,7 @@ medida que se liberan observaciones nuevas durante la competencia.
 - [x] Datos iniciales descargados y validados (sin nulos, sin duplicados,
       continuidad de 15 min completa en las 12 estaciones)
 - [x] EDA inicial — ver [`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb)
+- [x] Modelo de datos (diagrama entidad-relación) — ver [`docs/data-model.md`](docs/data-model.md)
 - [ ] Definir la pregunta predictiva formal
 - [ ] Baselines (naive + uno más elaborado) con validación temporal
 - [ ] Pipeline de ingesta/features/entrenamiento/predicción/monitoreo (`src/`)
@@ -34,6 +35,12 @@ medida que se liberan observaciones nuevas durante la competencia.
 - Clima y eventos muestran relación no lineal con la demanda, posiblemente
   confundida con la hora del día — requiere control explícito antes de usarlos
   como features.
+
+## Modelo de datos
+
+El diagrama entidad-relación (datos fuente del API + la capa de features,
+modelos, métricas, predicciones y ejecuciones del pipeline de ML) está en
+[`docs/data-model.md`](docs/data-model.md).
 
 ## Cómo correr esto
 
