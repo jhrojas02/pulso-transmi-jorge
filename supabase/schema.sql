@@ -113,3 +113,22 @@ create table if not exists prediccion (
 
 create index if not exists idx_prediccion_run on prediccion (run_id);
 create index if not exists idx_prediccion_station_target on prediccion (station_id, target_timestamp);
+
+-- ============================================================
+-- Row Level Security: habilitado sin políticas.
+-- Bloquea todo acceso vía anon/authenticated key (ej. un futuro
+-- dashboard). Solo la service_role key (usada por el pipeline en
+-- GitHub Actions) puede leer/escribir, porque esa key salta RLS
+-- siempre. Si más adelante se construye el dashboard de Vercel y
+-- necesita leer con la anon key, agregar ahí políticas de SELECT
+-- explícitas por tabla, nunca deshabilitar RLS.
+-- ============================================================
+
+alter table estacion enable row level security;
+alter table contexto enable row level security;
+alter table observacion enable row level security;
+alter table feature_vector enable row level security;
+alter table modelo enable row level security;
+alter table metrica_validacion enable row level security;
+alter table ejecucion_pipeline enable row level security;
+alter table prediccion enable row level security;

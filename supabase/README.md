@@ -1,18 +1,53 @@
 # Supabase (opcional / bono)
 
-`schema.sql` contiene el DDL de PostgreSQL derivado de `docs/data-model.md`,
-listo para crear las 7 tablas del proyecto (`estacion`, `contexto`,
-`observacion`, `feature_vector`, `modelo`, `metrica_validacion`,
-`ejecucion_pipeline`, `prediccion`) en un proyecto de Supabase.
+`schema.sql` contiene el DDL de PostgreSQL derivado de `docs/data-model.md`:
+8 tablas (`estacion`, `contexto`, `observacion`, `feature_vector`, `modelo`,
+`metrica_validacion`, `ejecucion_pipeline`, `prediccion`) con FKs, checks e
+índices, más Row Level Security habilitado sin políticas.
 
-## Cómo aplicarlo
+## Estado actual
 
-**Opción A — SQL Editor (más simple):** en el panel de tu proyecto de
-Supabase, abre *SQL Editor → New query*, pega el contenido de `schema.sql`
-y ejecuta.
+Ya aplicado en un proyecto real de Supabase, vía el conector MCP conectado
+a esta cuenta de Claude:
 
-**Opción B — psql / CLI de Supabase**, desde tu propia terminal (no desde
-esta sesión, que no tiene credenciales ni acceso configurado a tu proyecto):
+- **Proyecto:** `pulso-transmi` (región `sa-east-1`, plan gratuito)
+- **URL del API:** `https://giahdocqjnpscgbskkyf.supabase.co`
+- **Las 8 tablas están creadas** y con RLS **habilitado sin políticas** —
+  bloqueado para `anon`/`authenticated`, solo accesible con la
+  `service_role key` (que siempre salta RLS).
+
+`schema.sql` queda como la fuente de verdad versionada del esquema — si se
+necesita recrear el proyecto o levantar uno nuevo, se vuelve a aplicar tal
+cual (es idempotente: usa `if not exists`).
+
+## Cómo conectar el pipeline (`src/ingest.py`, etc.) a esta base
+
+1. En el dashboard de Supabase → *Project Settings → API*, copia la
+   **`service_role key`** (no la `anon`/`publishable`).
+2. Guárdala como **secret de GitHub Actions** en tu repo
+   (`SUPABASE_SERVICE_ROLE_KEY`), nunca en el código ni en `.env` versionado.
+3. El pipeline se conecta con esa key + la URL de arriba; como usa
+   `service_role`, ignora RLS y puede leer/escribir todas las tablas.
+
+## Si en el futuro se construye el dashboard (Vercel)
+
+El dashboard NO debe usar la `service_role key` en el navegador. Dos
+opciones:
+- Agregar políticas de **`SELECT`** explícitas por tabla para el rol
+  `anon` (solo lectura) y usar la `anon`/`publishable key` en el frontend.
+- O, más seguro, un backend intermedio (API route de Vercel) que consulte
+  Supabase con la `service_role key` del lado del servidor y nunca la
+  exponga al navegador.
+
+Cualquiera de las dos formas se agrega como una migración nueva en este
+archivo (o uno adicional), nunca deshabilitando RLS.
+
+## Cómo volver a aplicar el esquema manualmente (si hiciera falta)
+
+**SQL Editor (más simple):** en el panel del proyecto, *SQL Editor → New
+query*, pega el contenido de `schema.sql` y ejecuta.
+
+**psql / CLI de Supabase**, desde tu propia terminal:
 
 ```bash
 psql "$SUPABASE_DB_URL" -f supabase/schema.sql
@@ -21,21 +56,11 @@ supabase db execute -f supabase/schema.sql
 ```
 
 `SUPABASE_DB_URL` es la cadena de conexión de *Project Settings → Database
-→ Connection string* (usa la de "connection pooling" si tu red bloquea
-conexiones directas por IPv6).
-
-## Por qué no lo apliqué yo directamente
-
-Esta sesión no tiene un conector de Supabase ni tus credenciales de
-proyecto, así que no puedo ejecutar el DDL contra tu base real. Si quieres
-que lo haga desde aquí, la forma más segura es que tú mismo corras el
-comando de la Opción B en tu terminal — evita pegar la cadena de conexión
-(que incluye la contraseña de la base) en el chat.
+→ Connection string*.
 
 ## Recordatorio de seguridad
 
-**Nunca** expongas la `service_role key` ni la cadena de conexión con
-contraseña en código de frontend/navegador. Para el dashboard opcional
-(Vercel), usa únicamente la `anon key` pública con Row Level Security
-habilitado, o mejor, un backend intermedio que consulte Supabase con la
-`service_role key` del lado del servidor.
+**Nunca** expongas la `service_role key` ni una cadena de conexión con
+contraseña en código de frontend/navegador ni en el repo. Va como secret
+de GitHub Actions o variable de entorno del servidor, igual que la API key
+de Pulso TransMi.
