@@ -3,3 +3,4 @@ matplotlib>=3.8
 seaborn>=0.13
 jupyter
 nbformat
+requests>=2.31
