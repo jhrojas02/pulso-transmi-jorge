@@ -84,11 +84,11 @@ def naive_baseline(train_df, test_df):
     return merged["y_pred"].to_numpy()
 
 
-def gbm_candidate(train_df, test_df):
+def gbm_candidate(train_df, test_df, station_categories):
     X_train = train_df[FEATURE_COLS].copy()
     X_test = test_df[FEATURE_COLS].copy()
-    X_train["station_id"] = X_train["station_id"].astype("category")
-    X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=X_train["station_id"].cat.categories)
+    X_train["station_id"] = pd.Categorical(X_train["station_id"], categories=station_categories)
+    X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=station_categories)
 
     model = HistGradientBoostingRegressor(
         categorical_features=["station_id"],
@@ -120,6 +120,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
     max_date = base["observed_at"].max()
     test_start = max_date - pd.Timedelta(days=TEST_DAYS)
     val_start = test_start - pd.Timedelta(days=VALIDATION_DAYS)
+    station_categories = sorted(base["station_id"].unique().tolist())
 
     ARTIFACTS_DIR.mkdir(exist_ok=True)
     summary_rows = []
@@ -138,7 +139,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         # Paso 1 — elegir el ganador por estación SOLO con validación
         # (fit_train_df -> predice val_df), nunca se toca test_df aquí.
         val_naive_pred = naive_baseline(fit_train_df, val_df)
-        _, val_gbm_pred = gbm_candidate(fit_train_df, val_df)
+        _, val_gbm_pred = gbm_candidate(fit_train_df, val_df, station_categories)
         val_naive_acc = evaluate_by_station(val_df, val_naive_pred).set_index("station_id")["accuracy"]
         val_gbm_acc = evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"]
         winner_by_station = {
@@ -152,7 +153,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         naive_by_station = evaluate_by_station(test_df, naive_pred)
         naive_overall_wape, naive_overall_acc = wape_accuracy(test_df["target_demand"], naive_pred)
 
-        model, gbm_pred = gbm_candidate(full_train_df, test_df)
+        model, gbm_pred = gbm_candidate(full_train_df, test_df, station_categories)
         gbm_by_station = evaluate_by_station(test_df, gbm_pred)
         gbm_overall_wape, gbm_overall_acc = wape_accuracy(test_df["target_demand"], gbm_pred)
 
@@ -160,8 +161,13 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         hybrid_by_station = evaluate_by_station(test_df, hybrid_pred)
         hybrid_overall_wape, hybrid_overall_acc = wape_accuracy(test_df["target_demand"], hybrid_pred)
 
+        # Se guarda el modelo JUNTO con el orden de categorías de
+        # station_id que vio en entrenamiento: HistGradientBoostingRegressor
+        # codifica la categórica por posición, no por el string, así que
+        # predict.py debe reconstruir exactamente el mismo orden o las
+        # predicciones quedarían mal asignadas sin ningún error visible.
         model_path = ARTIFACTS_DIR / f"gbm_h{horizon_min}.joblib"
-        joblib.dump(model, model_path)
+        joblib.dump({"model": model, "station_categories": station_categories}, model_path)
 
         summary_rows.append({
             "horizon_min": horizon_min,
