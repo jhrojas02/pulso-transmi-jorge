@@ -29,6 +29,30 @@ cual (es idempotente: usa `if not exists`).
 3. El pipeline se conecta con esa key + la URL de arriba; como usa
    `service_role`, ignora RLS y puede leer/escribir todas las tablas.
 
+## Modelos promovidos (Supabase Storage)
+
+Bucket **privado** `models`, creado vía Storage API con la `secret key`
+(nunca con la `publishable key`, que quedaría bloqueada por RLS/policies
+de Storage igual que las tablas). Convención de ruta, para que cada
+versión quede identificable y nunca se sobrescriba silenciosamente:
+
+```
+models/<model_id>/gbm.joblib
+```
+
+`model_id` coincide con la fila de la tabla `modelo` (ej.
+`model_2026-09-18_hybrid_h15`), y `modelo.artifact_uri` guarda la
+referencia como `supabase-storage://models/<model_id>/gbm.joblib` — el
+componente que sirve predicciones (`predict.py`, aún por construir)
+debe leer esa columna, no asumir la ruta.
+
+Nota: el modelo "champion" real por horizonte es un híbrido (naive +
+GBM, elegido por estación en validación); lo único que se serializa en
+Storage es la parte de gradient boosting — el baseline naive se
+recalcula en tiempo de predicción a partir de `observacion`/`contexto`
+(no tiene estado entrenable que valga la pena guardar como artefacto).
+`modelo.feature_list` incluye qué estación usa cuál de los dos.
+
 ## Si en el futuro se construye el dashboard (Vercel)
 
 El dashboard NO debe usar la `service_role key` en el navegador. Dos
