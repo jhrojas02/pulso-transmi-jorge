@@ -6,9 +6,21 @@ naive y el candidato de gradient boosting, en cada uno de los 4
 horizontes oficiales (+15, +30, +45, +60 min). Guarda los modelos
 entrenados (joblib) y un resumen de métricas.
 
-Validación: partición TEMPORAL (38 días train / 7 días test), nunca
-aleatoria — mezclar futuro y pasado inflaría la métrica de forma
-artificial (el modelo "vería" el futuro durante el entrenamiento).
+Validación: partición TEMPORAL en 3 bloques (31 días train / 7 días
+validación / 7 días test), nunca aleatoria — mezclar futuro y pasado
+inflaría la métrica de forma artificial (el modelo "vería" el futuro
+durante el entrenamiento). La validación decide, por estación, si el
+naive o el GBM gana ahí; el test —nunca tocado en esa decisión— da la
+métrica final.
+
+Nota sobre el early stopping del GBM: internamente separa su propio
+10% de validación DEL BLOQUE DE ENTRENAMIENTO (aleatorio, no temporal)
+para decidir cuándo parar de agregar árboles. No es fuga hacia el
+target real (esas filas nunca se usan para ajustar hojas, solo para
+medir cuándo parar), pero es una simplificación: idealmente esa
+decisión también sería temporal. Se acepta porque el propósito del
+early stopping es reducir sobreajuste frente a un `max_iter` fijo
+elegido a mano, no maximizar accuracy a toda costa.
 
 Riesgo de fuga de datos: el corte train/test se hace por fecha ANTES de
 calcular cualquier estadístico (medias del baseline, hiperparámetros).
@@ -34,7 +46,7 @@ VALIDATION_DAYS = 7
 HORIZONS_MIN = [15, 30, 45, 60]
 FEATURE_COLS = [
     "station_id", "hour", "day_of_week", "is_weekend",
-    "lag_1", "lag_4_96", "rolling_mean_24h",
+    "lag_1", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
     "rain_mm", "temperature_c", "event_intensity",
 ]
 ARTIFACTS_DIR = Path(__file__).parent.parent / "artifacts"
@@ -80,10 +92,14 @@ def gbm_candidate(train_df, test_df):
 
     model = HistGradientBoostingRegressor(
         categorical_features=["station_id"],
-        max_iter=300,
+        loss="poisson",  # la demanda es un conteo no-negativo, no un error gaussiano
+        max_iter=2000,
         learning_rate=0.05,
         max_depth=6,
         min_samples_leaf=30,
+        early_stopping=True,
+        validation_fraction=0.1,
+        n_iter_no_change=20,
         random_state=42,
     )
     model.fit(X_train, train_df["target_demand"])
@@ -111,7 +127,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
     for horizon_min in HORIZONS_MIN:
         horizon_steps = horizon_min // 15
         df_h = shift_target_for_horizon(base, horizon_steps).dropna(
-            subset=["lag_1", "lag_4_96", "rolling_mean_24h"]
+            subset=["lag_1", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h"]
         )
 
         fit_train_df = df_h[df_h["observed_at"] < val_start]
