@@ -115,6 +115,69 @@ create index if not exists idx_prediccion_run on prediccion (run_id);
 create index if not exists idx_prediccion_station_target on prediccion (station_id, target_timestamp);
 
 -- ============================================================
+-- Capa 3: operación automatizada (guía operativa v2.0, 2026-09-21)
+-- ============================================================
+
+-- Cursor del sincronizador incremental (/v1/stream/observations). Una
+-- sola fila por fuente ("observations_stream"); guarda el cursor
+-- OPACO que devuelve la API (no un timestamp: el cursor real codifica
+-- observed_at + station_id para desempatar filas con el mismo
+-- instante), así que nunca se reconstruye a mano.
+create table if not exists sync_state (
+    source          text primary key,
+    cursor_value    text,
+    updated_at      timestamptz not null
+);
+
+-- Un recibo por (cycle_id, model_version): existe si ya se envió una
+-- submission para ese ciclo con esa versión de modelo. El workflow de
+-- inferencia lo consulta ANTES de predecir — si existe, termina sin
+-- reenviar (evita duplicados cuando el cron despierta 2-3 veces dentro
+-- de la misma ventana de 25 minutos).
+create table if not exists submission_receipt (
+    cycle_id            text not null,
+    model_version       text not null,
+    submission_id       text not null,
+    attempt             smallint not null,
+    status              text not null,
+    payload_hash        text not null,
+    data_cutoff         timestamptz not null,
+    predictions_sent    smallint not null,
+    idempotency_key     text not null,
+    received_at         timestamptz not null,
+    primary key (cycle_id, model_version)
+);
+
+-- Puntero del champion vigente por horizonte. El workflow de
+-- inferencia SIEMPRE lee de aquí — nunca asume "el último archivo
+-- entrenado". Solo el workflow de promoción escribe aquí, y solo
+-- cuando el candidato superó al champion actual.
+create table if not exists champion (
+    horizon_min     smallint primary key check (horizon_min in (15, 30, 45, 60)),
+    model_id        text not null references modelo (model_id),
+    promoted_at     timestamptz not null
+);
+
+-- Snapshot periódico de accuracy/cobertura/drift, calculado por
+-- monitor.py cuando hay predicciones con realidad ya observada. Sirve
+-- de bitácora para decidir reentrenamiento y como fuente del futuro
+-- dashboard (Vercel, bono).
+create table if not exists operational_metric (
+    metric_id           text primary key,
+    computed_at         timestamptz not null,
+    window_kind         text not null check (window_kind in ('rolling_24h', 'cumulative')),
+    horizon_min         smallint check (horizon_min in (15, 30, 45, 60)),
+    station_id          text references estacion (station_id), -- NULL = agregado
+    wape                double precision,
+    accuracy            double precision,
+    coverage            double precision not null check (coverage between 0 and 1),
+    n_evaluable          integer not null,
+    n_expected           integer not null
+);
+
+create index if not exists idx_operational_metric_computed_at on operational_metric (computed_at);
+
+-- ============================================================
 -- Row Level Security: habilitado sin políticas.
 -- Bloquea todo acceso vía anon/authenticated key (ej. un futuro
 -- dashboard). Solo la service_role key (usada por el pipeline en
@@ -132,3 +195,7 @@ alter table modelo enable row level security;
 alter table metrica_validacion enable row level security;
 alter table ejecucion_pipeline enable row level security;
 alter table prediccion enable row level security;
+alter table sync_state enable row level security;
+alter table submission_receipt enable row level security;
+alter table champion enable row level security;
+alter table operational_metric enable row level security;

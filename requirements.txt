@@ -4,3 +4,7 @@ seaborn>=0.13
 jupyter
 nbformat
 requests>=2.31
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+joblib>=1.3

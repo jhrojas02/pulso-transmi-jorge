@@ -1,0 +1,28 @@
+name: pulso-transmi-train
+
+on:
+  schedule:
+    - cron: "0 9 * * *"  # una vez al día, no en cada despertar del cron de inferencia
+  workflow_dispatch:
+
+concurrency:
+  group: pulso-transmi-train
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Entrenar candidato y promover si supera al champion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: python -m src.pipeline.promote
