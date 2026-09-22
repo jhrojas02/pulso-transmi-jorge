@@ -31,8 +31,8 @@ MAX_STATION_REGRESSION = 2.0  # ninguna estación puede empeorar más que esto v
 
 
 def load_full_history():
-    observations = sb.select_all("observacion", select="station_id,observed_at,demand")
-    context = sb.select_all("contexto")
+    observations = sb.select_all("observacion", select="station_id,observed_at,demand", order="observed_at.asc,station_id.asc")
+    context = sb.select_all("contexto", order="observed_at.asc")
     return pd.DataFrame(observations), pd.DataFrame(context)
 
 

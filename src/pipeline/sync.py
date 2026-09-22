@@ -21,6 +21,7 @@ marcado — no es una lectura real del clima futuro.
 import os
 from datetime import datetime, timezone
 
+import pandas as pd
 import requests
 
 from src import supabase_client as sb
@@ -32,12 +33,17 @@ SOURCE = "observations_stream"
 def _ensure_context_for(observed_ats):
     """Garantiza que cada timestamp en `observed_ats` tenga fila en
     `contexto` (forward-fill del último conocido) antes de que
-    `observacion` intente referenciarlo."""
+    `observacion` intente referenciarlo.
+
+    Compara por Timestamp, no por string crudo: el stream del API
+    serializa como "...Z" y Supabase devuelve "...+00:00" para el
+    mismo instante — comparar los strings directamente nunca coincide
+    y hace parecer que siempre falta algo, aunque ya esté."""
     if not observed_ats:
         return
-    existing = sb.select_all("contexto", select="observed_at")
-    have = {row["observed_at"] for row in existing}
-    missing = sorted(t for t in set(observed_ats) if t not in have)
+    existing = sb.select_all("contexto", select="observed_at", order="observed_at.asc")
+    have_ts = {pd.Timestamp(row["observed_at"]) for row in existing}
+    missing = sorted(t for t in set(observed_ats) if pd.Timestamp(t) not in have_ts)
     if not missing:
         return
 

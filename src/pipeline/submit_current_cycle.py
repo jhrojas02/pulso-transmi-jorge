@@ -134,8 +134,8 @@ def _forward_fill_context(context_rows, cutoff_ts, cutoff_str):
 
 
 def build_features_as_of(data_cutoff, targets):
-    observations = sb.select_all("observacion", select="station_id,observed_at,demand")
-    context = sb.select_all("contexto")
+    observations = sb.select_all("observacion", select="station_id,observed_at,demand", order="observed_at.asc,station_id.asc")
+    context = sb.select_all("contexto", order="observed_at.asc")
 
     cutoff_ts = pd.Timestamp(data_cutoff)
     context = _forward_fill_context(context, cutoff_ts, data_cutoff)

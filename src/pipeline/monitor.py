@@ -24,11 +24,13 @@ from src.train import wape_accuracy
 
 def realized_predictions():
     preds = sb.select_all(
-        "prediccion", select="station_id,target_timestamp,horizonte,demanda_predicha,model_id,generated_at"
+        "prediccion",
+        select="station_id,target_timestamp,horizonte,demanda_predicha,model_id,generated_at",
+        order="prediction_id.asc",
     )
     if not preds:
         return pd.DataFrame()
-    obs = sb.select_all("observacion", select="station_id,observed_at,demand")
+    obs = sb.select_all("observacion", select="station_id,observed_at,demand", order="observed_at.asc,station_id.asc")
     pred_df = pd.DataFrame(preds)
     obs_df = pd.DataFrame(obs)
     return pred_df.merge(
@@ -72,7 +74,7 @@ def main():
         print("Sin predicciones con realidad ya observada todavía. Nada que evaluar.")
         return
 
-    all_preds = sb.select_all("prediccion", select="horizonte")
+    all_preds = sb.select_all("prediccion", select="horizonte", order="prediction_id.asc")
     total_by_horizon = pd.DataFrame(all_preds).groupby("horizonte").size().to_dict() if all_preds else {}
 
     now = datetime.now(timezone.utc)
