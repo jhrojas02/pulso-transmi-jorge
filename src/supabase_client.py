@@ -10,9 +10,27 @@ del entorno (nunca hardcodeados, van como GitHub Actions secrets).
 import os
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+# select_all pagina tablas grandes en decenas de requests seguidas; una
+# sola desconexión transitoria (visto en producción: "Connection reset
+# by peer" a mitad de una página) no debería tirar la corrida completa.
+# Reintenta con backoff tanto errores de conexión como 5xx/429.
+_session = requests.Session()
+_retry = Retry(
+    total=5,
+    connect=5,
+    read=5,
+    backoff_factor=1.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+)
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
+_session.mount("http://", HTTPAdapter(max_retries=_retry))
 
 
 def _require_config():
@@ -44,7 +62,7 @@ def select_all(table, select="*", filters=None, order=None, page_size=1000):
         params["order"] = order
     while True:
         headers = _headers({"Range-Unit": "items", "Range": f"{offset}-{offset + page_size - 1}"})
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", params=params, headers=headers, timeout=60)
+        r = _session.get(f"{SUPABASE_URL}/rest/v1/{table}", params=params, headers=headers, timeout=60)
         r.raise_for_status()
         batch = r.json()
         rows.extend(batch)
@@ -73,7 +91,7 @@ def select_top(table, select="*", filters=None, order=None, limit=1):
         params.update(filters)
     if order:
         params["order"] = order
-    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", params=params, headers=_headers(), timeout=60)
+    r = _session.get(f"{SUPABASE_URL}/rest/v1/{table}", params=params, headers=_headers(), timeout=60)
     r.raise_for_status()
     return r.json()
 
@@ -91,7 +109,7 @@ def write(table, rows, on_conflict=None, merge=False, batch_size=2000):
     params = {"on_conflict": on_conflict} if on_conflict else {}
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
-        r = requests.post(url, params=params, headers=headers, json=batch, timeout=60)
+        r = _session.post(url, params=params, headers=headers, json=batch, timeout=60)
         r.raise_for_status()
     return len(rows)
 
@@ -99,13 +117,13 @@ def write(table, rows, on_conflict=None, merge=False, batch_size=2000):
 def storage_upload(bucket, path, data: bytes, content_type="application/octet-stream"):
     _require_config()
     headers = _headers({"Content-Type": content_type, "x-upsert": "true"})
-    r = requests.post(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=headers, data=data, timeout=60)
+    r = _session.post(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=headers, data=data, timeout=60)
     r.raise_for_status()
     return r.json()
 
 
 def storage_download(bucket, path):
     _require_config()
-    r = requests.get(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=_headers(), timeout=60)
+    r = _session.get(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=_headers(), timeout=60)
     r.raise_for_status()
     return r.content
