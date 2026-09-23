@@ -47,10 +47,28 @@ HORIZONS_MIN = [15, 30, 45, 60]
 FEATURE_COLS = [
     "station_id", "hour", "day_of_week", "is_weekend",
     "target_hour", "target_day_of_week",
-    "lag_1", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+    "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+    "momentum_vs_ayer",
     "rain_mm", "temperature_c", "event_intensity",
 ]
+N_ENSEMBLE = 3  # cuántos HistGradientBoostingRegressor se promedian (bagging)
 ARTIFACTS_DIR = Path(__file__).parent.parent / "artifacts"
+
+
+class BaggedGBM:
+    """Promedio de varios HistGradientBoostingRegressor con distinto
+    random_state. Mismo modelo base, mismas features — solo reduce la
+    varianza de la predicción (cada árbol individual depende un poco
+    del orden aleatorio en que exploró los splits); no es una forma de
+    "hacer trampa" con datos adicionales, cada sub-modelo ve
+    exactamente el mismo train_df que uno solo vería."""
+
+    def __init__(self, models):
+        self.models = models
+
+    def predict(self, X):
+        preds = np.column_stack([m.predict(X) for m in self.models])
+        return preds.mean(axis=1)
 
 
 def wape_accuracy(y_true, y_pred):
@@ -94,19 +112,24 @@ def gbm_candidate(train_df, test_df, station_categories):
     X_train["station_id"] = pd.Categorical(X_train["station_id"], categories=station_categories)
     X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=station_categories)
 
-    model = HistGradientBoostingRegressor(
-        categorical_features=["station_id"],
-        loss="poisson",  # la demanda es un conteo no-negativo, no un error gaussiano
-        max_iter=2000,
-        learning_rate=0.05,
-        max_depth=6,
-        min_samples_leaf=30,
-        early_stopping=True,
-        validation_fraction=0.1,
-        n_iter_no_change=20,
-        random_state=42,
-    )
-    model.fit(X_train, train_df["target_demand"])
+    models = []
+    for i in range(N_ENSEMBLE):
+        m = HistGradientBoostingRegressor(
+            categorical_features=["station_id"],
+            loss="poisson",  # la demanda es un conteo no-negativo, no un error gaussiano
+            max_iter=2000,
+            learning_rate=0.05,
+            max_depth=6,
+            min_samples_leaf=30,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=20,
+            random_state=42 + i,
+        )
+        m.fit(X_train, train_df["target_demand"])
+        models.append(m)
+
+    model = BaggedGBM(models)
     y_pred = np.clip(model.predict(X_test), 0, None)
     return model, y_pred
 
@@ -132,7 +155,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
     for horizon_min in HORIZONS_MIN:
         horizon_steps = horizon_min // 15
         df_h = shift_target_for_horizon(base, horizon_steps).dropna(
-            subset=["lag_1", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h"]
+            subset=["lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h", "momentum_vs_ayer"]
         )
 
         fit_train_df = df_h[df_h["observed_at"] < val_start]

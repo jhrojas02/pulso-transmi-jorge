@@ -6,7 +6,14 @@ cargadas por ingest.py. Sale: un DataFrame con una fila por
 
 Decisiones de diseño (para que Jorge pueda defenderlas):
 
-- `lag_1`: demanda 15 min atrás (el paso inmediatamente anterior).
+- `lag_1` / `lag_2`: demanda 15 y 30 min atrás — los dos pasos
+  inmediatamente anteriores, para que el modelo vea la tendencia de
+  muy corto plazo (¿subiendo o bajando ahora mismo?), no solo un punto.
+- `momentum_vs_ayer` (`lag_1 - lag_4_96`): qué tan distinto está el
+  presente de lo típico a esta hora ayer. Es una señal explícita de
+  desvío, no solo otra copia de `lag_1` — un árbol tendría que
+  reconstruir esta resta él mismo en cada split si no se la damos ya
+  calculada.
 - `lag_4_96`: demanda 96 pasos atrás = mismo cuarto de hora, un día
   antes. Se eligió esta ventana (en vez de, p. ej., 4 pasos = 1 hora)
   porque el EDA mostró que la estacionalidad hora×día-de-semana es la
@@ -61,6 +68,7 @@ import pandas as pd
 
 STEP_MINUTES = 15
 LAG_1_STEPS = 1
+LAG_2_STEPS = 2
 LAG_DAY_STEPS = 96  # 24h / 15min
 LAG_WEEK_STEPS = 672  # 7 días / 15min
 ROLLING_STEPS = 96  # 24h
@@ -92,17 +100,25 @@ def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd
 
     g = df.groupby("station_id")["demand"]
     df["lag_1"] = g.shift(LAG_1_STEPS)
+    df["lag_2"] = g.shift(LAG_2_STEPS)
     df["lag_4_96"] = g.shift(LAG_DAY_STEPS)
     df["lag_672"] = g.shift(LAG_WEEK_STEPS)
     shifted = g.shift(1)
     df["rolling_mean_24h"] = shifted.rolling(ROLLING_STEPS, min_periods=ROLLING_STEPS).mean().reset_index(level=0, drop=True)
     df["rolling_std_24h"] = shifted.rolling(ROLLING_STEPS, min_periods=ROLLING_STEPS).std().reset_index(level=0, drop=True)
+    # "Momentum": qué tan distinto está el presente (lag_1) de lo típico
+    # a esta hora ayer (lag_4_96). No es solo otra copia de lag_1 — es
+    # una señal explícita de desvío ("hoy va más cargado que ayer a
+    # esta hora"), que un árbol puede aprovechar sin tener que
+    # reconstruirla él mismo restando dos columnas en cada split.
+    df["momentum_vs_ayer"] = df["lag_1"] - df["lag_4_96"]
 
     df["target_demand"] = df["demand"].astype(float)
 
     cols = [
         "station_id", "observed_at", "hour", "day_of_week", "is_weekend",
-        "lag_1", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+        "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+        "momentum_vs_ayer",
         "rain_mm", "temperature_c", "event_intensity",
         "target_demand",
     ]
