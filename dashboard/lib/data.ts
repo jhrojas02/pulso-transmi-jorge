@@ -72,9 +72,9 @@ export type RunRow = {
 };
 
 export type LeaderboardRow = {
-  name: string;
+  display_name: string;
   accuracy: number | null;
-  wape?: number | null;
+  raw_wape?: number | null;
   coverage: number | null;
   rank: number | null;
   [key: string]: unknown;
@@ -184,10 +184,10 @@ async function getLeaderboard(): Promise<DashboardData["leaderboard"]> {
   try {
     const [me, board] = await Promise.all([pulso("/v1/me"), pulso("/v1/leaderboard?window=cumulative")]);
     if (!board) return { self: null, top: [], error: "leaderboard no disponible" };
-    const rows: LeaderboardRow[] = board.data ?? board.entries ?? board.leaderboard ?? [];
-    const myName = me?.name ?? me?.preferred_name ?? null;
+    const rows: LeaderboardRow[] = board.data ?? [];
+    const myName: string | null = me?.display_name ?? null;
     const self = myName
-      ? rows.find((r) => String(r.name).toLowerCase() === String(myName).toLowerCase()) ?? null
+      ? rows.find((r) => String(r.display_name).toLowerCase() === myName.toLowerCase()) ?? null
       : null;
     const top = [...rows].sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999)).slice(0, 8);
     return { self, top, error: null };

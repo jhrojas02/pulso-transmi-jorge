@@ -100,7 +100,7 @@ export default async function Page() {
               {data.leaderboard.top.map((row, i) => (
                 <tr key={i}>
                   <td>{row.rank ?? i + 1}</td>
-                  <td>{String(row.name)}</td>
+                  <td>{String(row.display_name)}</td>
                   <td>{row.accuracy != null ? Number(row.accuracy).toFixed(2) : "—"}</td>
                   <td>{row.coverage != null ? `${(Number(row.coverage) * 100).toFixed(0)}%` : "—"}</td>
                 </tr>
