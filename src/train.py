@@ -46,6 +46,7 @@ VALIDATION_DAYS = 7
 HORIZONS_MIN = [15, 30, 45, 60]
 FEATURE_COLS = [
     "station_id", "hour", "day_of_week", "is_weekend",
+    "target_hour", "target_day_of_week",
     "lag_1", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
     "rain_mm", "temperature_c", "event_intensity",
 ]
@@ -71,8 +72,11 @@ def evaluate_by_station(test_df, y_pred):
 
 
 def naive_baseline(train_df, test_df):
-    """Promedio histórico por (station_id, hour, day_of_week), solo con train."""
-    group_cols = ["station_id", "hour", "day_of_week"]
+    """Promedio histórico por (station_id, target_hour, target_day_of_week)
+    —la hora y día del MOMENTO QUE SE PREDICE, no del corte—, solo con
+    train. Es lo que un baseline estacional debería usar: "¿qué pasó
+    otras veces a esta hora/día?", sea cual sea el horizonte."""
+    group_cols = ["station_id", "target_hour", "target_day_of_week"]
     lookup = train_df.groupby(group_cols)["target_demand"].mean().rename("y_pred")
     station_mean = train_df.groupby("station_id")["target_demand"].mean().rename("y_pred")
 

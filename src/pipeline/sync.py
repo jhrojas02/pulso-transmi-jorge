@@ -8,14 +8,23 @@ vez de perderlo (nunca al revés — perder observaciones es peor que
 reprocesar unas de más, y el upsert las vuelve inofensivas).
 
 Nota conocida, descubierta en producción: el contexto (clima/eventos)
-no se publica vía stream, solo el histórico fijo inicial. Como
-`observacion.observed_at` tiene una foreign key hacia
-`contexto.observed_at` (supabase/schema.sql), insertar observaciones
-de timestamps sin contexto falla con 23503 — la base protegiendo
-integridad, no un bug. Antes de insertar observaciones, este módulo
-repite (forward-fill) el último contexto conocido hacia cualquier
-timestamp nuevo que todavía no tenga fila en `contexto`. Queda
-marcado — no es una lectura real del clima futuro.
+no se publica vía stream, solo el histórico fijo inicial (confirmado
+contra el API: /v1/context nunca avanza más allá de 2026-09-09T04:45Z,
+por más que pasen días reales — no es un retraso, el dataset
+simplemente no publica clima nuevo). Como `observacion.observed_at`
+tiene una foreign key hacia `contexto.observed_at`
+(supabase/schema.sql), insertar observaciones de timestamps sin
+contexto falla con 23503 — la base protegiendo integridad, no un bug.
+
+Antes de insertar observaciones, este módulo completa el contexto
+faltante con un ESTIMADO CLIMATOLÓGICO (promedio histórico real por
+hora:minuto del día, ver features.climatological_context) — no con la
+última lectura real repetida para siempre. Repetir un único valor real
+indefinidamente es peor: ese valor deja de representar cualquier
+condición real a medida que pasan los días, y el modelo puede terminar
+interpretando esa constante arbitraria como si fuera información. La
+climatología, en cambio, es un estimado honesto ("lo típico a esta
+hora"), explícitamente marcado como tal.
 """
 
 import os
@@ -25,15 +34,21 @@ import pandas as pd
 import requests
 
 from src import supabase_client as sb
+from src.features import climatological_context, estimate_context_row
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 SOURCE = "observations_stream"
 
+# Último instante con contexto REAL confirmado contra el API (/v1/meta
+# -> dataset.history_end). Cualquier fila de `contexto` después de esto
+# es, por construcción, un estimado climatológico, nunca una lectura.
+REAL_CONTEXT_CUTOFF = pd.Timestamp("2026-09-09T04:45:00Z")
+
 
 def _ensure_context_for(observed_ats):
     """Garantiza que cada timestamp en `observed_ats` tenga fila en
-    `contexto` (forward-fill del último conocido) antes de que
-    `observacion` intente referenciarlo.
+    `contexto` (estimado climatológico) antes de que `observacion`
+    intente referenciarlo.
 
     Compara por Timestamp, no por string crudo: el stream del API
     serializa como "...Z" y Supabase devuelve "...+00:00" para el
@@ -47,18 +62,18 @@ def _ensure_context_for(observed_ats):
     if not missing:
         return
 
-    last_context = sb.select_top("contexto", order="observed_at.desc", limit=1)
-    if not last_context:
-        raise RuntimeError("No hay contexto base para hacer forward-fill; carga el histórico inicial primero (ingest.py).")
-    last = last_context[0]
+    real_context = sb.select_all(
+        "contexto",
+        filters={"observed_at": f"lte.{REAL_CONTEXT_CUTOFF.isoformat()}"},
+        order="observed_at.asc",
+    )
+    if not real_context:
+        raise RuntimeError("No hay contexto real para calcular climatología; carga el histórico inicial primero (ingest.py).")
+    climatology = climatological_context(pd.DataFrame(real_context))
 
-    filled = []
-    for t in missing:
-        row = dict(last)
-        row["observed_at"] = t
-        filled.append(row)
+    filled = [estimate_context_row(t, climatology) for t in missing]
     sb.write("contexto", filled, on_conflict="observed_at", merge=False)
-    print(f"AVISO: contexto no publicado para {len(missing)} timestamps nuevos; forward-fill desde {last['observed_at']}")
+    print(f"AVISO: contexto no publicado para {len(missing)} timestamps nuevos; estimado con climatología (promedio histórico real por hora:minuto)")
 
 
 def sync_observations_from_saved_cursor():

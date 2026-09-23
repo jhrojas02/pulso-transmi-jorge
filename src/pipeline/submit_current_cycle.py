@@ -31,7 +31,7 @@ import pandas as pd
 import requests
 
 from src import supabase_client as sb
-from src.features import build_feature_frame
+from src.features import build_feature_frame, climatological_context, estimate_context_row, target_time_features
 from src.pipeline.sync import sync_observations_from_saved_cursor
 from src.train import FEATURE_COLS
 
@@ -115,21 +115,22 @@ def receipt_exists(cycle_id, model_version):
 
 
 def _forward_fill_context(context_rows, cutoff_ts, cutoff_str):
-    """El contexto no se publica vía stream (solo el histórico fijo).
-    Si `cutoff_ts` no tiene fila de contexto, se repite el último
-    contexto conocido — documentado aquí y en el log, nunca en
-    silencio. Compara por Timestamp (no por string crudo): Supabase y
-    el API de Pulso TransMi pueden serializar el mismo instante con
-    formato distinto ("...Z" vs "...+00:00")."""
+    """Red de seguridad: normalmente sync.py ya deja `contexto` con una
+    fila (climatológica) para cada timestamp nuevo antes de llegar
+    aquí. Si por algún motivo `cutoff_ts` sigue sin fila, se estima con
+    la misma climatología (promedio histórico real por hora:minuto),
+    nunca repitiendo la última lectura real — ver features.py y
+    pipeline/sync.py para el razonamiento completo. Compara por
+    Timestamp, no por string crudo: Supabase y el API pueden serializar
+    el mismo instante con formato distinto ("...Z" vs "...+00:00")."""
     if not context_rows:
         return context_rows
     have_ts = {pd.Timestamp(r["observed_at"]) for r in context_rows}
     if cutoff_ts in have_ts:
         return context_rows
-    last = max(context_rows, key=lambda r: pd.Timestamp(r["observed_at"]))
-    print(f"AVISO: contexto faltante en data_cutoff={cutoff_str}; forward-fill desde {last['observed_at']}")
-    row = dict(last)
-    row["observed_at"] = cutoff_str
+    print(f"AVISO: contexto faltante en data_cutoff={cutoff_str}; estimado con climatología")
+    climatology = climatological_context(pd.DataFrame(context_rows))
+    row = estimate_context_row(cutoff_str, climatology)
     return context_rows + [row]
 
 
@@ -149,6 +150,10 @@ def build_features_as_of(data_cutoff, targets):
 
 
 def predict_targets(model, cutoff_row_by_station, targets):
+    """Por cada target combina la fila de features del cutoff (lags,
+    rolling, clima — lo que se sabe HOY) con target_hour/target_day_of_week
+    calculados directo de `target_at` (lo único que describe el momento
+    FUTURO que se predice) — mismo esquema que usó el entrenamiento."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     predictions = []
@@ -159,15 +164,18 @@ def predict_targets(model, cutoff_row_by_station, targets):
         if feat_row is None:
             continue
 
+        tgt = target_time_features(t["target_at"])
+        combined = {**feat_row.to_dict(), **tgt}
+
         winner = model["winner_by_horizon"].get(horizon_min, {}).get(sid, "naive")
-        has_nan_features = bool(feat_row[FEATURE_COLS].isna().any())
+        has_nan_features = any(pd.isna(combined.get(c)) for c in FEATURE_COLS)
         if winner == "gbm" and horizon_min in model["models"] and not has_nan_features:
             bundle = model["models"][horizon_min]
-            X = pd.DataFrame([feat_row[FEATURE_COLS]])
+            X = pd.DataFrame([{c: combined[c] for c in FEATURE_COLS}])
             X["station_id"] = pd.Categorical(X["station_id"], categories=bundle["station_categories"])
             value = float(bundle["model"].predict(X)[0])
         else:
-            key = (sid, int(feat_row["hour"]), int(feat_row["day_of_week"]))
+            key = (sid, tgt["target_hour"], tgt["target_day_of_week"])
             value = float(lookup.get(key, station_mean.get(sid, 0.0)))
 
         value = max(0.0, value)

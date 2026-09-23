@@ -36,6 +36,16 @@ Decisiones de diseño (para que Jorge pueda defenderlas):
   contexto en el mismo `observed_at` de la fila — son observaciones
   pasadas/presentes, nunca `*_forecast` (eso sería la variable a usar
   en inferencia real para el futuro, no aquí).
+- `target_hour` / `target_day_of_week`: a diferencia de `hour`/
+  `day_of_week` (que describen el momento del corte, `observed_at`),
+  estas describen el momento que se está prediciendo
+  (`observed_at + horizonte`). Se calculan en `shift_target_for_horizon`
+  porque solo ahí se conoce el horizonte. Sin esto, el modelo predecía
+  a ciegas qué hora sería en el futuro (usando solo la hora del
+  presente) — con horizontes de hasta 60 min eso importa, sobre todo
+  cerca de cambios de hora pico. Es aritmética de calendario pura
+  (observed_at + horizonte), no usa ningún dato del futuro real, así
+  que no hay fuga.
 
 Riesgo de fuga de datos: el punto más delicado es `rolling_mean_24h`.
 Si no se excluye la fila actual antes de promediar, el modelo vería
@@ -109,4 +119,55 @@ def shift_target_for_horizon(df: pd.DataFrame, horizon_steps: int) -> pd.DataFra
     """
     out = df.copy()
     out["target_demand"] = out.groupby("station_id")["target_demand"].shift(-horizon_steps)
+
+    target_time = out["observed_at"] + pd.Timedelta(minutes=STEP_MINUTES * horizon_steps)
+    target_local = target_time.dt.tz_convert("America/Bogota")
+    out["target_hour"] = target_local.dt.hour.astype("int16")
+    out["target_day_of_week"] = target_local.dt.dayofweek.astype("int16")
+
     return out.dropna(subset=["target_demand"])
+
+
+def target_time_features(target_at) -> dict:
+    """Misma aritmética que shift_target_for_horizon, pero partiendo de
+    un target_at ya conocido (inferencia real: la API ya dice el
+    instante exacto que pide, no hay que sumarle nada)."""
+    ts = pd.Timestamp(target_at)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    local = ts.tz_convert("America/Bogota")
+    return {"target_hour": int(local.hour), "target_day_of_week": int(local.dayofweek)}
+
+
+def climatological_context(context: pd.DataFrame) -> pd.DataFrame:
+    """Promedio histórico de clima por (hora, minuto) local, calculado
+    con contexto REAL (nunca con filas ya rellenadas). Se usa como
+    estimado para timestamps donde el API ya no publica clima —en vez
+    de repetir para siempre la última lectura real conocida, que deja
+    de representar cualquier condición real a medida que pasan los
+    días—. Índice: hour*100+minute (ej. 1415 = 14:15)."""
+    ctx = context.copy()
+    ctx["observed_at"] = pd.to_datetime(ctx["observed_at"], utc=True)
+    local = ctx["observed_at"].dt.tz_convert("America/Bogota")
+    ctx["_hm"] = local.dt.hour * 100 + local.dt.minute
+    return ctx.groupby("_hm")[["rain_mm", "temperature_c", "event_intensity"]].mean()
+
+
+def estimate_context_row(observed_at, climatology: pd.DataFrame) -> dict:
+    """Arma una fila de contexto estimada (climatología) para
+    `observed_at`, con la misma forma que una fila real de `contexto`."""
+    ts = pd.Timestamp(observed_at)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    local = ts.tz_convert("America/Bogota")
+    hm = local.hour * 100 + local.minute
+    row = climatology.loc[hm]
+    value = observed_at if isinstance(observed_at, str) else ts.isoformat()
+    return {
+        "observed_at": value,
+        "rain_mm": float(row["rain_mm"]),
+        "rain_forecast": float(row["rain_mm"]),
+        "temperature_c": float(row["temperature_c"]),
+        "temperature_forecast": float(row["temperature_c"]),
+        "event_intensity": float(row["event_intensity"]),
+    }
