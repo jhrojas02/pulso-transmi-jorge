@@ -9,6 +9,10 @@ concurrency:
   group: pulso-transmi-predict
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write  # monitor.py necesita esto para poder disparar train.yml si detecta drift fuerte
+
 jobs:
   predict:
     runs-on: ubuntu-latest
@@ -26,8 +30,9 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m src.pipeline.submit_current_cycle
-      - name: Evaluar predicciones ya resueltas
+      - name: Evaluar predicciones ya resueltas (y disparar reentrenamiento si hay drift)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -m src.pipeline.monitor
