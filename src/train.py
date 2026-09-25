@@ -207,6 +207,13 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             "naive_by_station": naive_by_station.to_dict("records"),
             "gbm_by_station": gbm_by_station.to_dict("records"),
             "hybrid_by_station": hybrid_by_station.to_dict("records"),
+            # No serializables (DataFrames) — para que promote.py pueda evaluar
+            # el champion vigente en ESTA MISMA ventana de test, en vez de
+            # comparar contra sus métricas registradas de cuando se entrenó
+            # (que quedan obsoletas apenas los datos cambian, y mucho más si
+            # hay drift). Se filtran antes de escribir el JSON de resumen.
+            "_full_train_df": full_train_df,
+            "_test_df": test_df,
         })
 
         print(f"\n=== Horizonte +{horizon_min} min ===")
@@ -216,7 +223,8 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         print(f"Hybrid — accuracy promedio por estación: {hybrid_by_station['accuracy'].mean():.2f}  (gana GBM en: {sum(1 for v in winner_by_station.values() if v=='gbm')}/12 estaciones)")
 
     summary_path = ARTIFACTS_DIR / "training_summary.json"
-    summary_path.write_text(json.dumps(summary_rows, indent=2, default=str))
+    serializable_rows = [{k: v for k, v in row.items() if not k.startswith("_")} for row in summary_rows]
+    summary_path.write_text(json.dumps(serializable_rows, indent=2, default=str))
     print(f"\nResumen guardado en {summary_path}")
     return summary_rows
 

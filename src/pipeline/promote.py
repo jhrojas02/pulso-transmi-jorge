@@ -13,14 +13,26 @@ candidato que mejora en las estaciones grandes a costa de romper una
 chica — y SOLO si hay evidencia real de mejora mueve el puntero de
 champion. La versión anterior nunca se borra (artifact_uri nuevo,
 model_id nuevo) — queda disponible para rollback manual.
+
+El champion NO se compara contra sus métricas registradas (calculadas
+cuando se entrenó, en una ventana de test que ya quedó vieja). Se
+descarga y se evalúa EN VIVO sobre la misma ventana de test que ve el
+candidato en esta corrida — así el delta es honesto incluso si los
+datos cambiaron de régimen entre una promoción y la siguiente (drift
+incluido): el candidato reentrenado con datos frescos se compara
+contra cómo le va HOY al champion congelado, no contra un número de
+otro momento.
 """
 
+import io
 import json
 import os
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import joblib
+import numpy as np
 import pandas as pd
 
 from src import supabase_client as sb
@@ -36,21 +48,45 @@ def load_full_history():
     return pd.DataFrame(observations), pd.DataFrame(context)
 
 
-def current_champion_metrics():
-    champion_rows = sb.select_all("champion", order="horizon_min.asc")
-    result = {}
-    for row in champion_rows:
-        model_id = row["model_id"]
-        agg = sb.select_one("metrica_validacion", filters={"model_id": f"eq.{model_id}", "station_id": "is.null"})
-        by_station_rows = sb.select_all(
-            "metrica_validacion", filters={"model_id": f"eq.{model_id}", "station_id": "not.is.null"}
-        )
-        result[row["horizon_min"]] = {
-            "model_id": model_id,
-            "accuracy": agg["accuracy"] if agg else None,
-            "by_station": {r["station_id"]: r["accuracy"] for r in by_station_rows},
-        }
-    return result
+def load_champion_bundle(horizon_min):
+    """Descarga el champion vigente de ese horizonte (modelo + metadata) o
+    None si todavía no hay uno. Se usa para evaluarlo EN VIVO sobre la misma
+    ventana de test que ve el candidato — nunca contra sus métricas
+    registradas de cuando se entrenó, que quedan obsoletas apenas cambian
+    los datos (y mucho más rápido si hay drift)."""
+    champ_row = sb.select_one("champion", filters={"horizon_min": f"eq.{horizon_min}"})
+    if champ_row is None:
+        return None
+    modelo_row = sb.select_one("modelo", filters={"model_id": f"eq.{champ_row['model_id']}"})
+    if modelo_row is None:
+        return None
+    artifact_uri = modelo_row["artifact_uri"]
+    storage_path = artifact_uri.removeprefix("supabase-storage://models/")
+    blob = sb.storage_download("models", storage_path)
+    bundle = joblib.load(io.BytesIO(blob))
+    return {
+        "model": bundle["model"],
+        "station_categories": bundle["station_categories"],
+        "feature_cols": modelo_row["feature_list"]["features"],
+        "winner_by_station": modelo_row["feature_list"].get("winner_by_station", {}),
+    }
+
+
+def champion_accuracy_on(champ_bundle, train_df, test_df):
+    """Reconstruye la predicción híbrida EXACTA del champion (su modelo GBM
+    congelado + su selección naive/gbm por estación, también congelada)
+    pero prediciendo sobre la ventana de test de HOY. Así el delta contra
+    el candidato es una comparación real, no contra un número viejo."""
+    if champ_bundle is None:
+        return None, {}
+    naive_pred = train_mod.naive_baseline(train_df, test_df)
+    X_test = test_df[champ_bundle["feature_cols"]].copy()
+    X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=champ_bundle["station_categories"])
+    gbm_pred = np.clip(champ_bundle["model"].predict(X_test), 0, None)
+    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, gbm_pred, champ_bundle["winner_by_station"])
+    by_station = train_mod.evaluate_by_station(test_df, hybrid_pred)
+    overall = by_station["accuracy"].mean()
+    return overall, dict(zip(by_station["station_id"], by_station["accuracy"]))
 
 
 def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_inicio, cutoff_fin):
@@ -107,18 +143,17 @@ def upload_artifact(horizon_min, model_id):
     sb.storage_upload("models", f"{model_id}/gbm.joblib", path.read_bytes())
 
 
-def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champion_info):
+def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ_accuracy_mean, champ_by_station):
     candidate_by_station = {r["station_id"]: r["accuracy"] for r in candidate_summary["hybrid_by_station"]}
     candidate_mean = candidate_summary["hybrid_accuracy_mean_stations"]
-    champ = champion_info.get(horizon_min)
 
-    if champ is None or champ["accuracy"] is None:
+    if champ_accuracy_mean is None:
         should_promote = True
-        reason = "no había champion registrado para este horizonte"
+        reason = "no había champion vigente para este horizonte"
     else:
-        delta = candidate_mean - champ["accuracy"]
+        delta = candidate_mean - champ_accuracy_mean
         worst_regression = min(
-            (candidate_by_station[sid] - champ["by_station"][sid] for sid in candidate_by_station if sid in champ["by_station"]),
+            (candidate_by_station[sid] - champ_by_station[sid] for sid in candidate_by_station if sid in champ_by_station),
             default=0.0,
         )
         should_promote = delta >= MIN_IMPROVEMENT and worst_regression >= -MAX_STATION_REGRESSION
@@ -127,8 +162,8 @@ def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ
             f"peor caída por estación={worst_regression:+.2f} (tolerancia -{MAX_STATION_REGRESSION})"
         )
 
-    champ_acc_str = f"{champ['accuracy']:.2f}" if champ and champ["accuracy"] is not None else "n/a"
-    print(f"+{horizon_min}min: candidato={candidate_mean:.2f}  champion_actual={champ_acc_str}  "
+    champ_acc_str = f"{champ_accuracy_mean:.2f}" if champ_accuracy_mean is not None else "n/a"
+    print(f"+{horizon_min}min: candidato={candidate_mean:.2f}  champion_actual(evaluado en vivo)={champ_acc_str}  "
           f"-> {'PROMUEVE' if should_promote else 'no promueve'} ({reason})")
 
     if should_promote:
@@ -158,13 +193,16 @@ def main():
     cutoff_fin = test_start.date().isoformat()
 
     summary_rows = train_mod.run(obs_df, ctx_df)
-    champion_info = current_champion_metrics()
 
     decisions = []
     for row in summary_rows:
         horizon_min = row["horizon_min"]
         model_id, agg_acc = register_candidate(horizon_min, row, code_commit, version, cutoff_inicio, cutoff_fin)
-        promoted, reason = decide_and_promote(horizon_min, model_id, row, champion_info)
+
+        champ_bundle = load_champion_bundle(horizon_min)
+        champ_accuracy_mean, champ_by_station = champion_accuracy_on(champ_bundle, row["_full_train_df"], row["_test_df"])
+
+        promoted, reason = decide_and_promote(horizon_min, model_id, row, champ_accuracy_mean, champ_by_station)
         decisions.append({"horizon_min": horizon_min, "model_id": model_id, "accuracy": agg_acc, "promoted": promoted, "reason": reason})
 
     run_id = f"run_{uuid.uuid4().hex[:16]}"
