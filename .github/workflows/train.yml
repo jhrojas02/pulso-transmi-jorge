@@ -2,7 +2,7 @@ name: pulso-transmi-train
 
 on:
   schedule:
-    - cron: "0 9 * * *"  # una vez al día, no en cada despertar del cron de inferencia
+    - cron: "0 */6 * * *"  # cada 6h: baja el peor caso de reacción al drift sin comparar contra ruido de corto plazo
   workflow_dispatch:
 
 concurrency:
