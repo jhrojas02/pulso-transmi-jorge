@@ -67,7 +67,7 @@ def load_promoted_model():
         raise RuntimeError(f"champion incompleto: {len(champion_rows)}/{len(HORIZONS)} horizontes tienen puntero")
 
     models = {}
-    winner_by_horizon = {}
+    blend_weight_by_horizon = {}
     versions = set()
     trained_ats = set()
     training_data_ends = set()
@@ -80,7 +80,15 @@ def load_promoted_model():
         trained_ats.add(modelo_row["trained_at"])
         training_data_ends.add(modelo_row["cutoff_train_fin"])
         feature_list = modelo_row["feature_list"]
-        winner_by_horizon[row["horizon_min"]] = feature_list.get("winner_by_station", {})
+        blend_weight_by_station = feature_list.get("blend_weight_by_station")
+        if blend_weight_by_station is None:
+            # Champion anterior a la mezcla suave: equivalente exacto de su
+            # selección dura (ver promote.load_champion_bundle).
+            blend_weight_by_station = {
+                sid: (1.0 if winner == "gbm" else 0.0)
+                for sid, winner in feature_list.get("winner_by_station", {}).items()
+            }
+        blend_weight_by_horizon[row["horizon_min"]] = blend_weight_by_station
 
         artifact_uri = modelo_row["artifact_uri"]
         assert artifact_uri.startswith("supabase-storage://models/"), f"artifact_uri inesperado: {artifact_uri}"
@@ -99,7 +107,7 @@ def load_promoted_model():
 
     return {
         "models": models,
-        "winner_by_horizon": winner_by_horizon,
+        "blend_weight_by_horizon": blend_weight_by_horizon,
         "version": model_version,
         "trained_at": trained_at,
         "training_data_end": training_data_end,
@@ -153,7 +161,11 @@ def predict_targets(model, cutoff_row_by_station, targets):
     """Por cada target combina la fila de features del cutoff (lags,
     rolling, clima — lo que se sabe HOY) con target_hour/target_day_of_week
     calculados directo de `target_at` (lo único que describe el momento
-    FUTURO que se predice) — mismo esquema que usó el entrenamiento."""
+    FUTURO que se predice) — mismo esquema que usó el entrenamiento.
+
+    Mezcla naive y GBM con el peso congelado por estación (ver
+    train.hybrid_predict) en vez de elegir uno solo — mismo criterio que
+    usó el entrenamiento para esta versión de champion."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     predictions = []
@@ -167,16 +179,19 @@ def predict_targets(model, cutoff_row_by_station, targets):
         tgt = target_time_features(t["target_at"])
         combined = {**feat_row.to_dict(), **tgt}
 
-        winner = model["winner_by_horizon"].get(horizon_min, {}).get(sid, "naive")
+        key = (sid, tgt["target_hour"], tgt["target_day_of_week"])
+        naive_value = float(lookup.get(key, station_mean.get(sid, 0.0)))
+
+        weight = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, 0.0)
         has_nan_features = any(pd.isna(combined.get(c)) for c in FEATURE_COLS)
-        if winner == "gbm" and horizon_min in model["models"] and not has_nan_features:
+        if weight > 0 and horizon_min in model["models"] and not has_nan_features:
             bundle = model["models"][horizon_min]
             X = pd.DataFrame([{c: combined[c] for c in FEATURE_COLS}])
             X["station_id"] = pd.Categorical(X["station_id"], categories=bundle["station_categories"])
-            value = float(bundle["model"].predict(X)[0])
+            gbm_value = float(bundle["model"].predict(X)[0])
+            value = weight * gbm_value + (1 - weight) * naive_value
         else:
-            key = (sid, tgt["target_hour"], tgt["target_day_of_week"])
-            value = float(lookup.get(key, station_mean.get(sid, 0.0)))
+            value = naive_value
 
         value = max(0.0, value)
         predictions.append({

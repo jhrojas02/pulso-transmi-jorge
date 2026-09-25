@@ -64,26 +64,36 @@ def load_champion_bundle(horizon_min):
     storage_path = artifact_uri.removeprefix("supabase-storage://models/")
     blob = sb.storage_download("models", storage_path)
     bundle = joblib.load(io.BytesIO(blob))
+    feature_list = modelo_row["feature_list"]
+    blend_weight_by_station = feature_list.get("blend_weight_by_station")
+    if blend_weight_by_station is None:
+        # Champion anterior a la mezcla suave (v3): equivalente exacto de su
+        # selección dura, para que siga funcionando sin reentrenar antes.
+        blend_weight_by_station = {
+            sid: (1.0 if winner == "gbm" else 0.0)
+            for sid, winner in feature_list.get("winner_by_station", {}).items()
+        }
     return {
         "model": bundle["model"],
         "station_categories": bundle["station_categories"],
-        "feature_cols": modelo_row["feature_list"]["features"],
-        "winner_by_station": modelo_row["feature_list"].get("winner_by_station", {}),
+        "feature_cols": feature_list["features"],
+        "blend_weight_by_station": blend_weight_by_station,
     }
 
 
 def champion_accuracy_on(champ_bundle, train_df, test_df):
     """Reconstruye la predicción híbrida EXACTA del champion (su modelo GBM
-    congelado + su selección naive/gbm por estación, también congelada)
-    pero prediciendo sobre la ventana de test de HOY. Así el delta contra
-    el candidato es una comparación real, no contra un número viejo."""
+    congelado + sus pesos de mezcla naive/gbm por estación, también
+    congelados) pero prediciendo sobre la ventana de test de HOY. Así el
+    delta contra el candidato es una comparación real, no contra un número
+    viejo."""
     if champ_bundle is None:
         return None, {}
     naive_pred = train_mod.naive_baseline(train_df, test_df)
     X_test = test_df[champ_bundle["feature_cols"]].copy()
     X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=champ_bundle["station_categories"])
     gbm_pred = np.clip(champ_bundle["model"].predict(X_test), 0, None)
-    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, gbm_pred, champ_bundle["winner_by_station"])
+    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, gbm_pred, champ_bundle["blend_weight_by_station"])
     by_station = train_mod.evaluate_by_station(test_df, hybrid_pred)
     overall = by_station["accuracy"].mean()
     return overall, dict(zip(by_station["station_id"], by_station["accuracy"]))
@@ -96,6 +106,7 @@ def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_in
     feature_list = {
         "features": train_mod.FEATURE_COLS,
         "winner_by_station": summary_row["winner_by_station"],
+        "blend_weight_by_station": summary_row["blend_weight_by_station"],
         "gbm_loss": "poisson",
         "early_stopping": True,
     }
