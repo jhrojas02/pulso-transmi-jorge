@@ -78,8 +78,17 @@ def main():
     total_by_horizon = pd.DataFrame(all_preds).groupby("horizonte").size().to_dict() if all_preds else {}
 
     now = datetime.now(timezone.utc)
-    since_24h = now - timedelta(hours=24)
-    rolling = merged[pd.to_datetime(merged["target_timestamp"]) >= since_24h]
+    # El escenario corre sobre un reloj VIRTUAL (GET /v1/clock -> virtual_now),
+    # muy distinto de la hora real — hoy real 2026-09-25, virtual_now cerca de
+    # 2026-09-13. Comparar target_timestamp (que vive en el tiempo virtual)
+    # contra el reloj real dejaba `rolling` siempre vacío: nunca hubo un solo
+    # target en las "últimas 24h" reales. Usamos como referencia el target
+    # más reciente que ya tiene realidad observada, que sí vive en el mismo
+    # tiempo virtual que target_timestamp.
+    target_ts = pd.to_datetime(merged["target_timestamp"])
+    virtual_now = target_ts.max()
+    since_24h = virtual_now - timedelta(hours=24)
+    rolling = merged[target_ts >= since_24h]
 
     rows = _metric_rows(merged, "cumulative", now) + _metric_rows(rolling, "rolling_24h", now)
     for row in rows:
