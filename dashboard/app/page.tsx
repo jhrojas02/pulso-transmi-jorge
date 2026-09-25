@@ -1,4 +1,5 @@
 import { getDashboardData, type StationMetric } from "@/lib/data";
+import { accCell, TrendChart, StationMap, LeaderboardBars } from "@/lib/charts";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -18,14 +19,6 @@ function collectorStatus(min: number | null) {
   return { dot: "dot-critical", text: "detenido" };
 }
 
-function accCell(acc: number | null) {
-  if (acc === null) return { bg: "var(--gridline)", fg: "var(--text-muted)", label: "—" };
-  const t = Math.max(0, Math.min(1, (acc - 60) / 35));
-  const steps = ["var(--seq-100)", "var(--seq-250)", "var(--seq-400)", "var(--seq-550)", "var(--seq-700)"];
-  const idx = Math.min(steps.length - 1, Math.floor(t * steps.length));
-  return { bg: steps[idx], fg: idx >= 2 ? "#ffffff" : "var(--text-primary)", label: acc.toFixed(1) };
-}
-
 function fmtDate(iso: string | null | undefined) {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("es-CO", { dateStyle: "medium", timeStyle: "short" });
@@ -39,13 +32,14 @@ export default async function Page() {
   const horizons = [15, 30, 45, 60];
   const byKey = new Map(data.stationMetrics.map((m) => [`${m.station_id}::${m.horizon_min}`, m]));
   const stationNameById = new Map(data.stationMetrics.map((m) => [m.station_id, m.station_name]));
+  const selfName = data.leaderboard.self ? String(data.leaderboard.self.display_name) : null;
 
   return (
     <main className="page">
       <div className="header">
         <div>
           <h1>Pulso TransMi</h1>
-          <div className="subtitle">Dashboard operativo — bono de observabilidad</div>
+          <div className="subtitle">Dashboard operativo — observabilidad del pipeline en vivo</div>
         </div>
         <span className="badge">
           <span className={`dot ${collector.dot}`} />
@@ -87,27 +81,26 @@ export default async function Page() {
           </p>
         )}
         {data.leaderboard.top.length > 0 && (
-          <table style={{ marginTop: 12 }}>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Nombre</th>
-                <th>Accuracy</th>
-                <th>Cobertura</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.leaderboard.top.map((row, i) => (
-                <tr key={i}>
-                  <td>{row.rank ?? i + 1}</td>
-                  <td>{String(row.display_name)}</td>
-                  <td>{row.accuracy != null ? Number(row.accuracy).toFixed(2) : "—"}</td>
-                  <td>{row.coverage != null ? `${(Number(row.coverage) * 100).toFixed(0)}%` : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div style={{ marginTop: 16 }}>
+            <LeaderboardBars rows={data.leaderboard.top} selfName={selfName} />
+          </div>
         )}
+      </section>
+
+      <section className="section">
+        <h2>Tendencia de accuracy (acumulada, última semana)</h2>
+        <div className="trend-grid">
+          {data.trend.map((t) => (
+            <TrendChart key={t.horizon_min} trend={t} />
+          ))}
+        </div>
+      </section>
+
+      <section className="section">
+        <h2>Mapa de estaciones</h2>
+        <div className="card map-card">
+          <StationMap stations={data.stationsGeo} />
+        </div>
       </section>
 
       <section className="section">
@@ -158,8 +151,8 @@ export default async function Page() {
           })}
         </div>
         <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          Si el rolling de 24h cae bien por debajo del acumulado, es señal de drift reciente — motivo para revisar
-          la próxima corrida de <code className="mono">promote.py</code>.
+          Si la caída promedio supera 3 puntos, el pipeline dispara un reentrenamiento antes de tiempo automáticamente
+          (ver <code className="mono">monitor.py</code>) — no hace falta ninguna acción manual.
         </p>
       </section>
 

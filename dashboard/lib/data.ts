@@ -80,11 +80,25 @@ export type LeaderboardRow = {
   [key: string]: unknown;
 };
 
+export type StationGeo = {
+  station_id: string;
+  station_name: string;
+  corridor: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+};
+
+export type TrendPoint = { t: string; accuracy: number };
+export type AccuracyTrend = { horizon_min: number; points: TrendPoint[] };
+
 export type DashboardData = {
   fetchedAt: string;
   collector: { lastSyncAt: string | null; lagMinutes: number | null };
   champions: ChampionEntry[];
   stationMetrics: StationMetric[];
+  stationsGeo: StationGeo[];
+  trend: AccuracyTrend[];
   drift: HorizonDrift[];
   recentRuns: RunRow[];
   trainingRuns: RunRow[];
@@ -132,6 +146,47 @@ async function getStationMetrics(): Promise<StationMetric[]> {
     latest.push({ ...m, station_name: nameById.get(m.station_id) });
   }
   return latest.sort((a, b) => a.station_id.localeCompare(b.station_id) || a.horizon_min - b.horizon_min);
+}
+
+async function getStationsGeo(stationMetrics: StationMetric[]): Promise<StationGeo[]> {
+  const stations = await sb("estacion", { select: "station_id,station_name,corridor,latitude,longitude" });
+  const avgAccByStation = new Map<string, number[]>();
+  for (const m of stationMetrics) {
+    if (m.accuracy == null) continue;
+    const arr = avgAccByStation.get(m.station_id) ?? [];
+    arr.push(m.accuracy);
+    avgAccByStation.set(m.station_id, arr);
+  }
+  return stations.map((s: any) => {
+    const accs = avgAccByStation.get(s.station_id);
+    const accuracy = accs && accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : null;
+    return { ...s, accuracy };
+  });
+}
+
+async function getAccuracyTrend(): Promise<AccuracyTrend[]> {
+  const rows = await sb("operational_metric", {
+    select: "computed_at,horizon_min,accuracy",
+    window_kind: "eq.cumulative",
+    station_id: "is.null",
+    order: "computed_at.asc",
+  });
+  const horizons = [15, 30, 45, 60];
+  return horizons.map((h) => {
+    const forH = rows.filter((r: any) => r.horizon_min === h);
+    // Downsample a buckets de 1h (toma el último valor de cada hora) — la
+    // tabla tiene una fila por cada despertar del cron (~cada 10 min), casi
+    // siempre repitiendo el mismo valor; una hora es suficiente resolución
+    // para ver la tendencia sin miles de puntos redundantes.
+    const byHour = new Map<string, TrendPoint>();
+    for (const r of forH) {
+      const d = new Date(r.computed_at);
+      d.setMinutes(0, 0, 0);
+      byHour.set(d.toISOString(), { t: d.toISOString(), accuracy: r.accuracy });
+    }
+    const points = Array.from(byHour.values()).sort((a, b) => a.t.localeCompare(b.t));
+    return { horizon_min: h, points: points.slice(-72) };
+  });
 }
 
 async function getDrift(): Promise<HorizonDrift[]> {
@@ -197,19 +252,23 @@ async function getLeaderboard(): Promise<DashboardData["leaderboard"]> {
 }
 
 export async function getDashboardData(): Promise<DashboardData> {
-  const [collector, champions, stationMetrics, drift, runs, leaderboard] = await Promise.all([
+  const [collector, champions, stationMetrics, drift, runs, leaderboard, trend] = await Promise.all([
     getCollectorLag(),
     getChampions(),
     getStationMetrics(),
     getDrift(),
     getRuns(),
     getLeaderboard(),
+    getAccuracyTrend(),
   ]);
+  const stationsGeo = await getStationsGeo(stationMetrics);
   return {
     fetchedAt: new Date().toISOString(),
     collector,
     champions,
     stationMetrics,
+    stationsGeo,
+    trend,
     drift,
     recentRuns: runs.recentRuns,
     trainingRuns: runs.trainingRuns,

@@ -191,3 +191,73 @@ footer {
   font-size: 12px;
   text-align: center;
 }
+
+/* Tendencia (small multiples) */
+.trend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.trend-chart {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 12px 8px;
+}
+.trend-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.trend-delta { font-size: 11px; font-weight: 600; }
+.trend-delta.good { color: var(--status-good); }
+.trend-delta.bad { color: var(--status-critical); }
+.trend-svg { width: 100%; height: auto; display: block; }
+.trend-empty {
+  height: 70px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Mapa */
+.map-card { display: flex; flex-direction: column; align-items: center; }
+.map-svg { width: 100%; max-width: 380px; height: auto; display: block; }
+.map-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.map-legend-swatch { width: 16px; height: 10px; border-radius: 2px; }
+.map-legend-label { font-size: 11px; color: var(--text-muted); }
+
+/* Leaderboard: barras horizontales */
+.lb-bars { display: flex; flex-direction: column; gap: 6px; }
+.lb-row {
+  display: grid;
+  grid-template-columns: 20px 1fr 3fr 44px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.lb-rank { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+.lb-name { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-name-self { font-weight: 700; }
+.lb-you { color: var(--status-good); font-weight: 600; font-size: 11px; }
+.lb-track {
+  height: 14px;
+  background: var(--gridline);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.lb-fill { display: block; height: 100%; border-radius: 4px; }
+.lb-value { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
