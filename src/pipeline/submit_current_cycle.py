@@ -68,6 +68,7 @@ def load_promoted_model():
 
     models = {}
     blend_weight_by_horizon = {}
+    feature_cols_by_horizon = {}
     versions = set()
     trained_ats = set()
     training_data_ends = set()
@@ -80,6 +81,13 @@ def load_promoted_model():
         trained_ats.add(modelo_row["trained_at"])
         training_data_ends.add(modelo_row["cutoff_train_fin"])
         feature_list = modelo_row["feature_list"]
+        # Cada horizonte guarda su propia lista de features (feature_list["features"]),
+        # tal como las vio SU modelo al entrenar — nunca la constante FEATURE_COLS
+        # del código actual. Los horizontes se reentrenan y promueven en momentos
+        # distintos (ver promote.py: cada uno se compara y decide por separado), así
+        # que en cualquier momento pueden convivir champions entrenados con
+        # versiones de features distintas del feature engineering.
+        feature_cols_by_horizon[row["horizon_min"]] = feature_list["features"]
         blend_weight_by_station = feature_list.get("blend_weight_by_station")
         if blend_weight_by_station is None:
             # Champion anterior a la mezcla suave: equivalente exacto de su
@@ -108,6 +116,7 @@ def load_promoted_model():
     return {
         "models": models,
         "blend_weight_by_horizon": blend_weight_by_horizon,
+        "feature_cols_by_horizon": feature_cols_by_horizon,
         "version": model_version,
         "trained_at": trained_at,
         "training_data_end": training_data_end,
@@ -183,10 +192,11 @@ def predict_targets(model, cutoff_row_by_station, targets):
         naive_value = float(lookup.get(key, station_mean.get(sid, 0.0)))
 
         weight = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, 0.0)
-        has_nan_features = any(pd.isna(combined.get(c)) for c in FEATURE_COLS)
+        feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)
+        has_nan_features = any(pd.isna(combined.get(c)) for c in feature_cols)
         if weight > 0 and horizon_min in model["models"] and not has_nan_features:
             bundle = model["models"][horizon_min]
-            X = pd.DataFrame([{c: combined[c] for c in FEATURE_COLS}])
+            X = pd.DataFrame([{c: combined[c] for c in feature_cols}])
             X["station_id"] = pd.Categorical(X["station_id"], categories=bundle["station_categories"])
             gbm_value = float(bundle["model"].predict(X)[0])
             value = weight * gbm_value + (1 - weight) * naive_value
