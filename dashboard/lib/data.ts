@@ -165,10 +165,16 @@ async function getStationsGeo(stationMetrics: StationMetric[]): Promise<StationG
 }
 
 async function getAccuracyTrend(): Promise<AccuracyTrend[]> {
+  // Solo necesitamos ~72h de historial (downsample a 1h más abajo), así que
+  // le pedimos a Supabase que filtre por fecha en la query en vez de traer
+  // todo el histórico acumulado (semanas de filas, una por cada cron de
+  // ~10 min) y recortarlo después en JS — evita el egress innecesario.
+  const since = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
   const rows = await sb("operational_metric", {
     select: "computed_at,horizon_min,accuracy",
     window_kind: "eq.cumulative",
     station_id: "is.null",
+    computed_at: `gte.${since}`,
     order: "computed_at.asc",
   });
   const horizons = [15, 30, 45, 60];

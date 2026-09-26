@@ -72,6 +72,11 @@ LAG_2_STEPS = 2
 LAG_DAY_STEPS = 96  # 24h / 15min
 LAG_WEEK_STEPS = 672  # 7 días / 15min
 ROLLING_STEPS = 96  # 24h
+ROLLING_STEPS_SHORT = 16  # 4h — capta el pico/valle de las últimas horas,
+# más rápido que rolling_mean_24h/rolling_std_24h para estaciones volátiles
+# (alto coeficiente de variación: picos de hora punta muy por encima del
+# promedio diario). Validado A/B: mejora el accuracy en las 4 estaciones
+# más difíciles (05000, 09122, 09000, 10009), sobre todo a +60min.
 
 
 def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
@@ -106,6 +111,8 @@ def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd
     shifted = g.shift(1)
     df["rolling_mean_24h"] = shifted.rolling(ROLLING_STEPS, min_periods=ROLLING_STEPS).mean().reset_index(level=0, drop=True)
     df["rolling_std_24h"] = shifted.rolling(ROLLING_STEPS, min_periods=ROLLING_STEPS).std().reset_index(level=0, drop=True)
+    df["rolling_mean_4h"] = shifted.rolling(ROLLING_STEPS_SHORT, min_periods=ROLLING_STEPS_SHORT).mean().reset_index(level=0, drop=True)
+    df["rolling_std_4h"] = shifted.rolling(ROLLING_STEPS_SHORT, min_periods=ROLLING_STEPS_SHORT).std().reset_index(level=0, drop=True)
     # "Momentum": qué tan distinto está el presente (lag_1) de lo típico
     # a esta hora ayer (lag_4_96). No es solo otra copia de lag_1 — es
     # una señal explícita de desvío ("hoy va más cargado que ayer a
@@ -118,6 +125,7 @@ def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd
     cols = [
         "station_id", "observed_at", "hour", "day_of_week", "is_weekend",
         "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+        "rolling_mean_4h", "rolling_std_4h",
         "momentum_vs_ayer",
         "rain_mm", "temperature_c", "event_intensity",
         "target_demand",

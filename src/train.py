@@ -53,6 +53,7 @@ FEATURE_COLS = [
     "station_id", "hour", "day_of_week", "is_weekend",
     "target_hour", "target_day_of_week",
     "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+    "rolling_mean_4h", "rolling_std_4h",
     "momentum_vs_ayer",
     "rain_mm", "temperature_c", "event_intensity",
 ]
@@ -124,8 +125,8 @@ def gbm_candidate(train_df, test_df, station_categories):
             loss="poisson",  # la demanda es un conteo no-negativo, no un error gaussiano
             max_iter=2000,
             learning_rate=0.05,
-            max_depth=6,
-            min_samples_leaf=30,
+            max_depth=8,
+            min_samples_leaf=15,
             early_stopping=True,
             validation_fraction=0.1,
             n_iter_no_change=20,
@@ -178,7 +179,11 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
     for horizon_min in HORIZONS_MIN:
         horizon_steps = horizon_min // 15
         df_h = shift_target_for_horizon(base, horizon_steps).dropna(
-            subset=["lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h", "momentum_vs_ayer"]
+            subset=[
+                "lag_1", "lag_2", "lag_4_96", "lag_672",
+                "rolling_mean_24h", "rolling_std_24h", "rolling_mean_4h", "rolling_std_4h",
+                "momentum_vs_ayer",
+            ]
         )
 
         fit_train_df = df_h[df_h["observed_at"] < val_start]
