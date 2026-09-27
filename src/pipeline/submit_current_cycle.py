@@ -33,7 +33,7 @@ import requests
 from src import supabase_client as sb
 from src.features import build_feature_frame, climatological_context, estimate_context_row, target_time_features
 from src.pipeline.sync import sync_observations_from_saved_cursor
-from src.train import FEATURE_COLS
+from src.train import FEATURE_COLS, weighted_naive_tables
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 PULSO_API_KEY = os.environ.get("PULSO_API_KEY", "")
@@ -336,8 +336,12 @@ def main():
     cutoff_row_by_station, base = build_features_as_of(cycle["data_cutoff"], cycle["targets"])
     print(f"Estaciones con feature_row en data_cutoff: {len(cutoff_row_by_station)}/12")
 
-    model["_naive_lookup"] = base.groupby(["station_id", "hour", "day_of_week"])["target_demand"].mean()
-    model["_naive_station_mean"] = base.groupby("station_id")["target_demand"].mean()
+    # Misma función que usa train.py (weighted_naive_tables) para que el
+    # naive en vivo pondere por recencia igual que el que se evaluó y
+    # promovió — nunca una copia propia del cálculo, que fue justo el tipo
+    # de divergencia entre entrenamiento e inferencia que ya rompió
+    # producción una vez (ver feature_cols_by_horizon más arriba).
+    model["_naive_lookup"], model["_naive_station_mean"] = weighted_naive_tables(base, "hour", "day_of_week")
 
     predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"])
 

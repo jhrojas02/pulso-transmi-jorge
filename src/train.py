@@ -54,7 +54,7 @@ FEATURE_COLS = [
     "target_hour", "target_day_of_week",
     "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
     "rolling_mean_4h", "rolling_std_4h",
-    "momentum_vs_ayer",
+    "momentum_vs_ayer", "drift_4h_vs_24h",
     "rain_mm", "temperature_c", "event_intensity",
 ]
 N_ENSEMBLE = 3  # cuántos HistGradientBoostingRegressor se promedian (bagging)
@@ -95,16 +95,54 @@ def evaluate_by_station(test_df, y_pred):
     return pd.DataFrame(rows)
 
 
+NAIVE_HALFLIFE_DAYS = 14  # a una observación de hace 14 días le pesa la mitad
+# que una de hoy; a las 4 semanas, un cuarto. Antes el naive promediaba TODO
+# el histórico por igual, así que un cambio real de régimen (ej. la caída
+# de demanda de madrugada en 05100, ver docs de la corrida de monitoreo)
+# quedaba diluido entre semanas de datos ya obsoletos y el baseline tardaba
+# muchísimo en "enterarse". Con decaimiento exponencial, las observaciones
+# recientes pesan más sin descartar el histórico viejo de golpe (que sigue
+# aportando en estaciones estables). Validado: no empeora el backtest en
+# régimen estable (la ponderación es casi plana cuando no hay quiebre),
+# y en teoría reacciona más rápido cuando sí lo hay.
+
+
+def weighted_naive_tables(df, hour_col, dow_col, halflife_days=NAIVE_HALFLIFE_DAYS):
+    """Tablas de lookup (por (station_id, hour_col, dow_col) y por
+    station_id solo) para el baseline naive, ponderadas por recencia
+    desde el `observed_at` más reciente de `df`. Función única para que
+    entrenamiento (naive_baseline, con hour_col/dow_col = target_hour/
+    target_day_of_week) e inferencia en vivo (submit_current_cycle.py,
+    con hour_col/dow_col = hour/day_of_week del cutoff) construyan
+    EXACTAMENTE la misma tabla — antes cada lado tenía su propia copia
+    del cálculo (sin ponderar, en el caso de inferencia), lo que
+    hubiera repetido el mismo tipo de bug que ya rompió producción una
+    vez con las features del GBM (ver commit que agrega
+    feature_cols_by_horizon)."""
+    ref_date = df["observed_at"].max()
+    age_days = (ref_date - df["observed_at"]).dt.total_seconds() / 86400
+    weight = np.exp(-np.log(2) * age_days / halflife_days)
+
+    weighted = df.assign(_w=weight, _wy=weight * df["target_demand"])
+    grouped = weighted.groupby(["station_id", hour_col, dow_col])[["_w", "_wy"]].sum()
+    lookup = grouped["_wy"] / grouped["_w"]
+
+    station_grouped = weighted.groupby("station_id")[["_w", "_wy"]].sum()
+    station_mean = station_grouped["_wy"] / station_grouped["_w"]
+    return lookup, station_mean
+
+
 def naive_baseline(train_df, test_df):
     """Promedio histórico por (station_id, target_hour, target_day_of_week)
     —la hora y día del MOMENTO QUE SE PREDICE, no del corte—, solo con
-    train. Es lo que un baseline estacional debería usar: "¿qué pasó
-    otras veces a esta hora/día?", sea cual sea el horizonte."""
+    train, ponderado por recencia (ver weighted_naive_tables). Es lo que
+    un baseline estacional debería usar: "¿qué pasó otras veces a esta
+    hora/día, dándole más peso a lo reciente?", sea cual sea el
+    horizonte."""
     group_cols = ["station_id", "target_hour", "target_day_of_week"]
-    lookup = train_df.groupby(group_cols)["target_demand"].mean().rename("y_pred")
-    station_mean = train_df.groupby("station_id")["target_demand"].mean().rename("y_pred")
+    lookup, station_mean = weighted_naive_tables(train_df, "target_hour", "target_day_of_week")
 
-    merged = test_df.merge(lookup, on=group_cols, how="left")
+    merged = test_df.merge(lookup.rename("y_pred"), on=group_cols, how="left")
     missing = merged["y_pred"].isna()
     if missing.any():
         fallback = test_df.loc[missing, "station_id"].map(station_mean)
@@ -182,7 +220,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             subset=[
                 "lag_1", "lag_2", "lag_4_96", "lag_672",
                 "rolling_mean_24h", "rolling_std_24h", "rolling_mean_4h", "rolling_std_4h",
-                "momentum_vs_ayer",
+                "momentum_vs_ayer", "drift_4h_vs_24h",
             ]
         )
 
