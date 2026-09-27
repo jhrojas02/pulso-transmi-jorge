@@ -24,6 +24,13 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Cachear modelos champion (evita re-bajar de Supabase Storage en cada corrida)
+        uses: actions/cache@v4
+        with:
+          path: .model_cache
+          key: model-cache-${{ github.run_id }}
+          restore-keys: |
+            model-cache-
       - name: Sincronizar, inferir y entregar
         env:
           PULSO_API_KEY: ${{ secrets.PULSO_API_KEY }}
