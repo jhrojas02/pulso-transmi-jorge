@@ -151,8 +151,28 @@ def _forward_fill_context(context_rows, cutoff_ts, cutoff_str):
     return context_rows + [row]
 
 
+OBSERVATIONS_LOOKBACK_DAYS = 21  # Egress de Supabase: este módulo corre cada 10
+# min y bajaba `observacion` COMPLETA cada vez (miles de filas que solo crecen
+# con el tiempo) — el mayor consumidor de egress del proyecto, muy por encima
+# del fix de la fecha en el dashboard. lag_672 (la feature más larga) solo
+# necesita 7 días hacia atrás, así que con eso alcanzaría — se sube a 21 para
+# no degradar demasiado el naive ponderado (weighted_naive_tables, half-life
+# 14 días: a los 21 días de historia, comparado con usar TODO el histórico,
+# la diferencia mediana en la tabla de lookup es ~3.8 sobre una escala de
+# demanda de 20-2000; a 14 días sube a ~6.3 — validado localmente antes de
+# este cambio). Sigue acotado en el tiempo: nunca vuelve a crecer sin límite
+# aunque `observacion` seguirá creciendo para siempre.
+NAIVE_LOOKBACK_DAYS = 21
+
+
 def build_features_as_of(data_cutoff, targets):
-    observations = sb.select_all("observacion", select="station_id,observed_at,demand", order="observed_at.asc,station_id.asc")
+    since = (pd.Timestamp(data_cutoff) - pd.Timedelta(days=max(OBSERVATIONS_LOOKBACK_DAYS, NAIVE_LOOKBACK_DAYS))).isoformat()
+    observations = sb.select_all(
+        "observacion",
+        select="station_id,observed_at,demand",
+        filters={"observed_at": f"gte.{since}"},
+        order="observed_at.asc,station_id.asc",
+    )
     context = sb.select_all("contexto", order="observed_at.asc")
 
     cutoff_ts = pd.Timestamp(data_cutoff)
