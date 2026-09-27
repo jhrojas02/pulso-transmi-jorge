@@ -24,6 +24,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -39,6 +40,15 @@ API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.s
 PULSO_API_KEY = os.environ.get("PULSO_API_KEY", "")
 MODELS_BUCKET = "models"
 HORIZONS = [15, 30, 45, 60]
+# Egress de Supabase Storage: cada modelo GBM (gbm.joblib) pesa 7-9 MB (ensemble
+# de 3 HistGradientBoostingRegressor, max_depth=8). Este módulo corre cada 10
+# min, 144 veces al día — bajar los 4 champions COMPLETOS en cada corrida
+# (~34MB/ciclo) sale a ~5GB/día aunque el champion casi nunca cambie. Con esto
+# en su lugar, solo se descarga de Storage cuando el model_id del champion
+# realmente cambió desde la última corrida (una promoción real) — el resto de
+# las veces se lee del caché local, que persiste entre corridas vía
+# actions/cache en predict.yml (ver ese workflow).
+MODEL_CACHE_DIR = Path(".model_cache")
 
 
 def get_current_cycle():
@@ -101,8 +111,15 @@ def load_promoted_model():
         artifact_uri = modelo_row["artifact_uri"]
         assert artifact_uri.startswith("supabase-storage://models/"), f"artifact_uri inesperado: {artifact_uri}"
         storage_path = artifact_uri.removeprefix("supabase-storage://models/")
-        blob = sb.storage_download(MODELS_BUCKET, storage_path)
-        bundle = joblib.load(io.BytesIO(blob))
+
+        cache_path = MODEL_CACHE_DIR / f"{model_id}.joblib"
+        if cache_path.exists():
+            bundle = joblib.load(cache_path)
+        else:
+            blob = sb.storage_download(MODELS_BUCKET, storage_path)
+            MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(blob)
+            bundle = joblib.load(io.BytesIO(blob))
         bundle["_model_id"] = model_id
         models[row["horizon_min"]] = bundle  # {"model":..., "station_categories":[...], "_model_id":...}
 
