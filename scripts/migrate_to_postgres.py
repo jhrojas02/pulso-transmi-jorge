@@ -40,7 +40,7 @@ TABLES_IN_ORDER = [
 
 def migrate_tables():
     for table, on_conflict in TABLES_IN_ORDER:
-        rows = sb.select_all(table)
+        rows = sb.select_all_rest(table)
         if not rows:
             print(f"{table}: sin filas, se salta")
             continue
@@ -51,14 +51,14 @@ def migrate_tables():
 def migrate_models():
     """Copia cada gbm.joblib del bucket `models` de Supabase Storage
     hacia model_blob en el Postgres destino."""
-    modelos = sb.select_all("modelo", select="model_id,artifact_uri")
+    modelos = sb.select_all_rest("modelo", select="model_id,artifact_uri")
     for row in modelos:
         artifact_uri = row["artifact_uri"]
         if not artifact_uri.startswith("supabase-storage://models/"):
             print(f"  aviso: artifact_uri inesperado, se salta: {artifact_uri}")
             continue
         storage_path = artifact_uri.removeprefix("supabase-storage://models/")
-        blob = sb.storage_download("models", storage_path)
+        blob = sb.storage_download_rest("models", storage_path)
         pg_client.storage_upload("models", storage_path, blob)
         print(f"modelo {row['model_id']}: {len(blob)} bytes copiados")
 
