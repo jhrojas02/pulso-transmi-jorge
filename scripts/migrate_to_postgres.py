@@ -49,10 +49,17 @@ def migrate_tables():
 
 
 def migrate_models():
-    """Copia cada gbm.joblib del bucket `models` de Supabase Storage
-    hacia model_blob en el Postgres destino."""
+    """Copia los .joblib de los 4 champions actuales (los únicos que
+    predict.yml/train.yml de verdad necesitan) desde Supabase Storage
+    hacia model_blob en el Postgres destino. No se intenta con el resto
+    del histórico de `modelo` (candidatos no promovidos) porque sus
+    artefactos ya se podaron de Storage hace tiempo y no existen."""
+    champions = sb.select_all_rest("champion", select="model_id")
+    model_ids = {row["model_id"] for row in champions}
     modelos = sb.select_all_rest("modelo", select="model_id,artifact_uri")
     for row in modelos:
+        if row["model_id"] not in model_ids:
+            continue
         artifact_uri = row["artifact_uri"]
         if not artifact_uri.startswith("supabase-storage://models/"):
             print(f"  aviso: artifact_uri inesperado, se salta: {artifact_uri}")
