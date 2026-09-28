@@ -136,7 +136,10 @@ def write(table, rows, on_conflict=None, merge=False, batch_size=2000):
         with conn.cursor() as cur:
             for i in range(0, len(rows), batch_size):
                 batch = rows[i : i + batch_size]
-                values = [[row.get(c) for c in cols] for row in batch]
+                values = [
+                    [psycopg2.extras.Json(v) if isinstance(v, (dict, list)) else v for v in (row.get(c) for c in cols)]
+                    for row in batch
+                ]
                 psycopg2.extras.execute_batch(cur, query, values)
         conn.commit()
     return len(rows)
