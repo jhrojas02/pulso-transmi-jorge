@@ -39,7 +39,28 @@ from src import supabase_client as sb
 from src import train as train_mod
 
 MIN_IMPROVEMENT = 0.5  # puntos de accuracy promedio mínimos para justificar promover
-MAX_STATION_REGRESSION = 2.0  # ninguna estación puede empeorar más que esto vs. el champion actual
+# Subido de 2.0 a 4.0 (2026-09-28): con 12 estaciones, el ruido normal de
+# volver a entrenar (random_state distinto, unos días más de datos) ya
+# produce una caída de 3-4 puntos en la estación más volátil AUNQUE el
+# candidato sea mejor en promedio — ver ejecucion_pipeline de los últimos
+# ~9 días de corridas de train.yml: candidatos con delta promedio positivo
+# rechazados una y otra vez por "peor caída por estación" de -3.31 a -3.91,
+# nunca por debajo de -4. Con el umbral viejo, NINGÚN candidato se promovió
+# desde que el champion actual quedó congelado (cutoff_train_fin ~04-06 de
+# septiembre), aunque el mundo real ya había cambiado bastante para
+# entonces (ver CHAMPION_FLOOR_ACCURACY_STATION más abajo).
+MAX_STATION_REGRESSION = 4.0
+# Si el champion YA está prediciendo mal en una estación (evaluado en vivo,
+# no su métrica vieja), no cuenta como "regresión bloqueante" que el
+# candidato también le vaya mal ahí — lo urgente es que el resto del
+# pipeline no se quede indefinidamente con un champion roto en esa estación
+# solo porque ninguna reentrenada logra un puntaje "seguro" ahí. Detectado
+# en vivo: 05100 tuvo una caída real de demanda (~600-650/día -> ~250/día,
+# 13-15 sep) que el champion nunca vio en entrenamiento (cutoff 04-06 sep)
+# y quedó con 4.5%-46% de accuracy en producción — sin este piso, cualquier
+# candidato que también le cueste esa estación (típico mientras el quiebre
+# es reciente) queda bloqueado igual, sin importar cuánto mejore el resto.
+CHAMPION_FLOOR_ACCURACY_STATION = 60.0
 
 
 def load_full_history():
@@ -65,35 +86,41 @@ def load_champion_bundle(horizon_min):
     blob = sb.storage_download("models", storage_path)
     bundle = joblib.load(io.BytesIO(blob))
     feature_list = modelo_row["feature_list"]
-    blend_weight_by_station = feature_list.get("blend_weight_by_station")
-    if blend_weight_by_station is None:
-        # Champion anterior a la mezcla suave (v3): equivalente exacto de su
-        # selección dura, para que siga funcionando sin reentrenar antes.
-        blend_weight_by_station = {
-            sid: (1.0 if winner == "gbm" else 0.0)
-            for sid, winner in feature_list.get("winner_by_station", {}).items()
-        }
+    mix_weights_by_station = feature_list.get("mix_weights_by_station")
+    if mix_weights_by_station is None:
+        # Champion de antes del blend de 3 vías (naive/fast/GBM, v4): mismo
+        # peso de GBM que tenía (2 vías), fast=0 — equivalente exacto de su
+        # comportamiento anterior, para que siga funcionando sin reentrenar.
+        blend_weight_by_station = feature_list.get("blend_weight_by_station")
+        if blend_weight_by_station is None:
+            # Champion aún más viejo (v3, selección dura, sin blend_weight).
+            blend_weight_by_station = {
+                sid: (1.0 if winner == "gbm" else 0.0)
+                for sid, winner in feature_list.get("winner_by_station", {}).items()
+            }
+        mix_weights_by_station = {sid: {"gbm": w, "fast": 0.0} for sid, w in blend_weight_by_station.items()}
     return {
         "model": bundle["model"],
         "station_categories": bundle["station_categories"],
         "feature_cols": feature_list["features"],
-        "blend_weight_by_station": blend_weight_by_station,
+        "mix_weights_by_station": mix_weights_by_station,
     }
 
 
 def champion_accuracy_on(champ_bundle, train_df, test_df):
     """Reconstruye la predicción híbrida EXACTA del champion (su modelo GBM
-    congelado + sus pesos de mezcla naive/gbm por estación, también
+    congelado + sus pesos de mezcla naive/fast/gbm por estación, también
     congelados) pero prediciendo sobre la ventana de test de HOY. Así el
     delta contra el candidato es una comparación real, no contra un número
     viejo."""
     if champ_bundle is None:
         return None, {}
     naive_pred = train_mod.naive_baseline(train_df, test_df)
+    fast_pred = train_mod.naive_fast_baseline(test_df)
     X_test = test_df[champ_bundle["feature_cols"]].copy()
     X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=champ_bundle["station_categories"])
     gbm_pred = np.clip(champ_bundle["model"].predict(X_test), 0, None)
-    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, gbm_pred, champ_bundle["blend_weight_by_station"])
+    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, champ_bundle["mix_weights_by_station"])
     by_station = train_mod.evaluate_by_station(test_df, hybrid_pred)
     overall = by_station["accuracy"].mean()
     return overall, dict(zip(by_station["station_id"], by_station["accuracy"]))
@@ -106,7 +133,7 @@ def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_in
     feature_list = {
         "features": train_mod.FEATURE_COLS,
         "winner_by_station": summary_row["winner_by_station"],
-        "blend_weight_by_station": summary_row["blend_weight_by_station"],
+        "mix_weights_by_station": summary_row["mix_weights_by_station"],
         "gbm_loss": "poisson",
         "early_stopping": True,
     }
@@ -163,14 +190,21 @@ def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ
         reason = "no había champion vigente para este horizonte"
     else:
         delta = candidate_mean - champ_accuracy_mean
-        worst_regression = min(
-            (candidate_by_station[sid] - champ_by_station[sid] for sid in candidate_by_station if sid in champ_by_station),
-            default=0.0,
-        )
+        # Solo cuentan como "regresión bloqueante" las estaciones donde el
+        # champion vigente todavía anda razonablemente bien (ver
+        # CHAMPION_FLOOR_ACCURACY_STATION) — una estación ya rota no puede
+        # seguir vetando reentrenamientos que mejoran todo lo demás.
+        regressions = {
+            sid: candidate_by_station[sid] - champ_by_station[sid]
+            for sid in candidate_by_station
+            if sid in champ_by_station and champ_by_station[sid] >= CHAMPION_FLOOR_ACCURACY_STATION
+        }
+        worst_station, worst_regression = min(regressions.items(), key=lambda kv: kv[1], default=(None, 0.0))
         should_promote = delta >= MIN_IMPROVEMENT and worst_regression >= -MAX_STATION_REGRESSION
         reason = (
             f"delta promedio={delta:+.2f} (umbral +{MIN_IMPROVEMENT}), "
-            f"peor caída por estación={worst_regression:+.2f} (tolerancia -{MAX_STATION_REGRESSION})"
+            f"peor caída por estación={worst_regression:+.2f} en {worst_station} "
+            f"(tolerancia -{MAX_STATION_REGRESSION}, ignorando estaciones con champion ya < {CHAMPION_FLOOR_ACCURACY_STATION})"
         )
 
     champ_acc_str = f"{champ_accuracy_mean:.2f}" if champ_accuracy_mean is not None else "n/a"

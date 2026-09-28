@@ -98,15 +98,18 @@ def load_promoted_model():
         # que en cualquier momento pueden convivir champions entrenados con
         # versiones de features distintas del feature engineering.
         feature_cols_by_horizon[row["horizon_min"]] = feature_list["features"]
-        blend_weight_by_station = feature_list.get("blend_weight_by_station")
-        if blend_weight_by_station is None:
-            # Champion anterior a la mezcla suave: equivalente exacto de su
-            # selección dura (ver promote.load_champion_bundle).
-            blend_weight_by_station = {
-                sid: (1.0 if winner == "gbm" else 0.0)
-                for sid, winner in feature_list.get("winner_by_station", {}).items()
-            }
-        blend_weight_by_horizon[row["horizon_min"]] = blend_weight_by_station
+        mix_weights_by_station = feature_list.get("mix_weights_by_station")
+        if mix_weights_by_station is None:
+            # Champion de antes del blend de 3 vías (naive/fast/GBM): mismo
+            # peso de GBM que tenía, fast=0 (ver promote.load_champion_bundle).
+            blend_weight_by_station = feature_list.get("blend_weight_by_station")
+            if blend_weight_by_station is None:
+                blend_weight_by_station = {
+                    sid: (1.0 if winner == "gbm" else 0.0)
+                    for sid, winner in feature_list.get("winner_by_station", {}).items()
+                }
+            mix_weights_by_station = {sid: {"gbm": w, "fast": 0.0} for sid, w in blend_weight_by_station.items()}
+        blend_weight_by_horizon[row["horizon_min"]] = mix_weights_by_station
 
         artifact_uri = modelo_row["artifact_uri"]
         assert artifact_uri.startswith("supabase-storage://models/"), f"artifact_uri inesperado: {artifact_uri}"
@@ -209,9 +212,10 @@ def predict_targets(model, cutoff_row_by_station, targets):
     calculados directo de `target_at` (lo único que describe el momento
     FUTURO que se predice) — mismo esquema que usó el entrenamiento.
 
-    Mezcla naive y GBM con el peso congelado por estación (ver
-    train.hybrid_predict) en vez de elegir uno solo — mismo criterio que
-    usó el entrenamiento para esta versión de champion."""
+    Mezcla naive, fast (persistencia rolling_mean_4h) y GBM con los pesos
+    congelados por estación (ver train.hybrid_predict) en vez de elegir uno
+    solo — mismo criterio que usó el entrenamiento para esta versión de
+    champion."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     predictions = []
@@ -227,18 +231,22 @@ def predict_targets(model, cutoff_row_by_station, targets):
 
         key = (sid, tgt["target_hour"], tgt["target_day_of_week"])
         naive_value = float(lookup.get(key, station_mean.get(sid, 0.0)))
+        fast_raw = combined.get("rolling_mean_4h")
+        fast_value = float(fast_raw) if pd.notna(fast_raw) else naive_value
 
-        weight = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, 0.0)
+        mix = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, {"gbm": 0.0, "fast": 0.0})
+        w_gbm, w_fast = mix["gbm"], mix["fast"]
         feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)
         has_nan_features = any(pd.isna(combined.get(c)) for c in feature_cols)
-        if weight > 0 and horizon_min in model["models"] and not has_nan_features:
+        if w_gbm > 0 and horizon_min in model["models"] and not has_nan_features:
             bundle = model["models"][horizon_min]
             X = pd.DataFrame([{c: combined[c] for c in feature_cols}])
             X["station_id"] = pd.Categorical(X["station_id"], categories=bundle["station_categories"])
             gbm_value = float(bundle["model"].predict(X)[0])
-            value = weight * gbm_value + (1 - weight) * naive_value
         else:
-            value = naive_value
+            gbm_value, w_gbm = 0.0, 0.0
+        w_naive = 1.0 - w_gbm - w_fast
+        value = w_naive * naive_value + w_fast * fast_value + w_gbm * gbm_value
 
         value = max(0.0, value)
         predictions.append({
