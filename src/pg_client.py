@@ -109,6 +109,21 @@ def select_top(table, select="*", filters=None, order=None, limit=1):
             return [dict(row) for row in cur.fetchall()]
 
 
+def _adapt(v):
+    """psycopg2 no sabe adaptar dict/list (jsonb) ni escalares numpy
+    (np.float64/np.int64/np.bool_, que aparecen en filas construidas con
+    pandas/sklearn, ej. en monitor.py) — a diferencia de la REST API de
+    Supabase, que los serializa a JSON sin quejarse. `.item()` es el
+    método estándar de numpy para volver un escalar a su tipo nativo
+    de Python; cualquier objeto que lo tenga (numpy, no dict/list) se
+    beneficia de este cast."""
+    if isinstance(v, (dict, list)):
+        return psycopg2.extras.Json(v)
+    if hasattr(v, "item") and not isinstance(v, (str, bytes)):
+        return v.item()
+    return v
+
+
 def write(table, rows, on_conflict=None, merge=False, batch_size=2000):
     """Mismo contrato que supabase_client.write: merge=True sobrescribe
     en conflicto (para sync_state, champion), merge=False ignora
@@ -136,10 +151,7 @@ def write(table, rows, on_conflict=None, merge=False, batch_size=2000):
         with conn.cursor() as cur:
             for i in range(0, len(rows), batch_size):
                 batch = rows[i : i + batch_size]
-                values = [
-                    [psycopg2.extras.Json(v) if isinstance(v, (dict, list)) else v for v in (row.get(c) for c in cols)]
-                    for row in batch
-                ]
+                values = [[_adapt(row.get(c)) for c in cols] for row in batch]
                 psycopg2.extras.execute_batch(cur, query, values)
         conn.commit()
     return len(rows)
