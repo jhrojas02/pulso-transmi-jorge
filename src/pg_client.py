@@ -21,6 +21,8 @@ razonable para Postgres, y evita depender de un segundo servicio
 Ver docs/plan-b-postgres.md para la guía completa de activación.
 """
 
+import datetime
+import decimal
 import os
 
 import psycopg2
@@ -77,6 +79,21 @@ def _build_order(order):
     return " ORDER BY " + ", ".join(parts)
 
 
+def _jsonify(v):
+    """La REST API de Supabase siempre devuelve JSON (timestamptz/date como
+    string ISO, numeric como number), pero psycopg2 devuelve los tipos
+    nativos de Python (datetime.datetime/date, decimal.Decimal) — que el
+    resto del pipeline no espera (ej. json.dumps del payload que se manda
+    a la API de Pulso revienta con "Object of type datetime is not JSON
+    serializable"). Se normaliza acá para que select_all/select_one/
+    select_top devuelvan lo mismo sin importar el backend."""
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return v.isoformat()
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    return v
+
+
 def select_all(table, select="*", filters=None, order=None, page_size=1000):
     """Ignora page_size (paginación por Range era un detalle del REST API
     de Supabase); una sola query trae todo lo que pide el filtro, que es
@@ -89,7 +106,7 @@ def select_all(table, select="*", filters=None, order=None, page_size=1000):
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
-            return [dict(row) for row in cur.fetchall()]
+            return [{k: _jsonify(v) for k, v in row.items()} for row in cur.fetchall()]
 
 
 def select_one(table, select="*", filters=None, order=None):
@@ -106,7 +123,7 @@ def select_top(table, select="*", filters=None, order=None, limit=1):
     with _connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params + [limit])
-            return [dict(row) for row in cur.fetchall()]
+            return [{k: _jsonify(v) for k, v in row.items()} for row in cur.fetchall()]
 
 
 def _adapt(v):
