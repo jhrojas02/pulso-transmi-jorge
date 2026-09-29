@@ -43,8 +43,21 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.features import build_feature_frame, shift_target_for_horizon
 
-TEST_DAYS = 7
-VALIDATION_DAYS = 7
+# Bajados de 7+7=14 a 3+2=5 días de rezago (2026-09-29): con el rezago
+# viejo, el corte de entrenamiento (cutoff_train_fin = max_date - TEST_DAYS)
+# queda TAN atrás que nunca alcanza a incluir un quiebre real de demanda
+# reciente como training data — solo lo ve como "test", nunca como
+# ejemplo del que aprender. Caso real: la caída de 05100 (13-15 sep) seguía
+# sin aparecer en el training set de los candidatos entrenados el 29 sep
+# (2 semanas después), con el candado de promoción ya arreglado y sin
+# ningún candidato promovido porque, literalmente, ninguno había tenido
+# la oportunidad de aprender el nuevo nivel de demanda. Con 5 días de
+# rezago en vez de 14, el corte alcanza la caída ~9 días de reloj virtual
+# antes. Costo aceptado: la ventana de test queda más chica (menos
+# robustez estadística en la métrica reportada) — aceptable frente a una
+# estación con accuracy de un dígito en producción ahora mismo.
+TEST_DAYS = 3
+VALIDATION_DAYS = 2
 HORIZONS_MIN = [15, 30, 45, 60]
 FEATURE_COLS = [
     "station_id", "hour", "day_of_week", "is_weekend",
