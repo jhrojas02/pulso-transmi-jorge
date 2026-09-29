@@ -6,19 +6,33 @@ desde ahí."""
 
 from src import pg_client as pg
 
-for sid in ["02300", "05000", "07111"]:
-    print(f"\n=== {sid}: predicción (h60) vs real, últimas 20 ===")
-    preds = pg.select_all(
-        "prediccion",
-        select="target_timestamp,demanda_predicha",
-        filters={"station_id": f"eq.{sid}", "horizonte": "eq.4"},
-        order="target_timestamp.desc",
-    )[:20]
-    for p in preds:
-        obs = pg.select_one(
-            "observacion",
-            select="demand",
-            filters={"station_id": f"eq.{sid}", "observed_at": f"eq.{p['target_timestamp']}"},
-        )
-        real = obs["demand"] if obs else None
-        print(f"  {p['target_timestamp']}  predicho={p['demanda_predicha']:.1f}  real={real}")
+print("=== submission_receipt: conteo y status ===")
+receipts = pg.select_all("submission_receipt", select="cycle_id,status,data_cutoff,received_at")
+print(f"total recibos: {len(receipts)}")
+by_status = {}
+for r in receipts:
+    by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+print("por status:", by_status)
+
+receipts_sorted = sorted(receipts, key=lambda r: r["data_cutoff"])
+print("\nprimeros 5:")
+for r in receipts_sorted[:5]:
+    print(" ", r)
+print("últimos 10:")
+for r in receipts_sorted[-10:]:
+    print(" ", r)
+
+print("\n=== huecos entre data_cutoff consecutivos (>35 min sugiere ciclo saltado) ===")
+import datetime
+prev = None
+gaps = []
+for r in receipts_sorted:
+    dc = datetime.datetime.fromisoformat(r["data_cutoff"].replace("Z", "+00:00")) if isinstance(r["data_cutoff"], str) else r["data_cutoff"]
+    if prev is not None:
+        delta_min = (dc - prev).total_seconds() / 60
+        if delta_min > 35:
+            gaps.append((prev.isoformat(), dc.isoformat(), delta_min))
+    prev = dc
+print(f"huecos encontrados: {len(gaps)}")
+for g in gaps[:20]:
+    print(" ", g)
