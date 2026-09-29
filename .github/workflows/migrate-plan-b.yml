@@ -1,0 +1,33 @@
+name: pulso-transmi-migrate-plan-b
+
+# Utilitario puntual (docs/plan-b-postgres.md, pasos 2-3): crea el schema en
+# el Postgres destino (DATABASE_URL) y copia el histórico desde Supabase.
+# Solo workflow_dispatch — nunca corre solo. Seguro de repetir (upsert por PK).
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Instalar cliente psql
+        run: sudo apt-get update -q && sudo apt-get install -y -q postgresql-client
+      - name: Crear schema en el Postgres destino
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          psql "$DATABASE_URL" -f supabase/schema.sql
+          psql "$DATABASE_URL" -f supabase/model_blob.sql
+      - name: Copiar histórico desde Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scripts.migrate_to_postgres

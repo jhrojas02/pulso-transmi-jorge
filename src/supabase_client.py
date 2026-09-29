@@ -127,3 +127,32 @@ def storage_download(bucket, path):
     r = _session.get(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=_headers(), timeout=60)
     r.raise_for_status()
     return r.content
+
+
+# Referencias fijas a la implementación REST de este archivo, ANTES de que
+# el bloque de abajo pueda reapuntar los nombres públicos a pg_client.
+# scripts/migrate_to_postgres.py las usa para leer del origen (Supabase)
+# incluso cuando DATABASE_URL ya está configurada para el destino — si
+# leyera por los nombres públicos, con DATABASE_URL puesta terminaría
+# leyendo del propio Postgres destino (vacío) en vez de Supabase.
+select_all_rest = select_all
+select_one_rest = select_one
+select_top_rest = select_top
+storage_download_rest = storage_download
+
+# Plan B (docs/plan-b-postgres.md): si Supabase queda restringido por Fair
+# Use Policy, activar es solo configurar DATABASE_URL (Neon/Railway/Postgres
+# propio) como secret — sin tocar ningún script del pipeline. Cuando NO está
+# configurada (el caso normal hoy), este bloque no hace nada y el archivo se
+# comporta exactamente igual que antes de este cambio. select_all/select_one/
+# etc. quedan reapuntadas a pg_client, que habla el mismo protocolo pero
+# contra Postgres directo en vez de la REST API de Supabase.
+if os.environ.get("DATABASE_URL", ""):
+    from src import pg_client as _pg
+
+    select_all = _pg.select_all
+    select_one = _pg.select_one
+    select_top = _pg.select_top
+    write = _pg.write
+    storage_upload = _pg.storage_upload
+    storage_download = _pg.storage_download
