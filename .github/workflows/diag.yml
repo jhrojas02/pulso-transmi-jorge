@@ -20,4 +20,5 @@ jobs:
       - run: pip install -r requirements.txt
       - env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PULSO_API_KEY: ${{ secrets.PULSO_API_KEY }}
         run: python -m scripts.diag_check

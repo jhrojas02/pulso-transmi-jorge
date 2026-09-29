@@ -1,38 +1,33 @@
-"""Diagnóstico puntual de solo lectura contra Neon (DATABASE_URL) — se
+"""Diagnóstico puntual de solo lectura contra Neon + API de Pulso — se
 corre desde .github/workflows/diag.yml porque este sandbox de desarrollo
 no tiene salida de red hacia Neon (bloqueada por política del entorno).
 No escribe nada; solo imprime a los logs de Actions para poder leerlo
 desde ahí."""
 
-import datetime
+import os
 
-from src import pg_client as pg
-
-receipts = pg.select_all(
-    "submission_receipt",
-    select="cycle_id,status,data_cutoff,received_at",
-    filters={"cycle_id": "neq.cyc_practice_20260918"},
-)
-receipts_sorted = sorted(receipts, key=lambda r: r["data_cutoff"])
-print(f"total recibos oficiales: {len(receipts_sorted)}")
-print("primer data_cutoff:", receipts_sorted[0]["data_cutoff"])
-print("último data_cutoff:", receipts_sorted[-1]["data_cutoff"])
-
-print("\n=== TODOS los huecos entre data_cutoff consecutivos (>70 min = probable ciclo saltado) ===")
-prev = None
-gaps = []
-for r in receipts_sorted:
-    dc = datetime.datetime.fromisoformat(r["data_cutoff"].replace("Z", "+00:00")) if isinstance(r["data_cutoff"], str) else r["data_cutoff"]
-    if prev is not None:
-        delta_min = (dc - prev).total_seconds() / 60
-        if delta_min > 70:
-            gaps.append((prev.isoformat(), dc.isoformat(), delta_min))
-    prev = dc
-print(f"huecos >70min encontrados: {len(gaps)}")
-for g in gaps:
-    print(f"  {g[0]}  ->  {g[1]}   ({g[2]:.0f} min = {g[2]/60:.1f} h)")
-
-print("\n=== estado del reloj ahora ===")
 import requests
-clock = requests.get("https://pulso-transmi.72-60-245-2.sslip.io/v1/clock", timeout=15).json()
-print(clock)
+
+API_BASE = "https://pulso-transmi.72-60-245-2.sslip.io"
+API_KEY = os.environ.get("PULSO_API_KEY", "")
+headers = {"Authorization": f"Bearer {API_KEY}"}
+
+print("=== /v1/me ===")
+r = requests.get(f"{API_BASE}/v1/me", headers=headers, timeout=15)
+print(r.status_code, r.text[:2000])
+
+print("\n=== /v1/leaderboard?window=cumulative ===")
+r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": "cumulative"}, headers=headers, timeout=15)
+print(r.status_code, r.text[:4000])
+
+print("\n=== /v1/leaderboard?window=rolling_24h ===")
+r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": "rolling_24h"}, headers=headers, timeout=15)
+print(r.status_code, r.text[:4000])
+
+print("\n=== /v1/portal/accuracy-chart ===")
+r = requests.get(f"{API_BASE}/v1/portal/accuracy-chart", headers=headers, timeout=15)
+print(r.status_code, r.text[:4000])
+
+print("\n=== /v1/portal/dashboard ===")
+r = requests.get(f"{API_BASE}/v1/portal/dashboard", headers=headers, timeout=15)
+print(r.status_code, r.text[:3000])
