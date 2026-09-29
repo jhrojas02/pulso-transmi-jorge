@@ -38,7 +38,20 @@ import pandas as pd
 from src import supabase_client as sb
 from src import train as train_mod
 
-MIN_IMPROVEMENT = 0.5  # puntos de accuracy promedio mínimos para justificar promover
+MIN_IMPROVEMENT_BY_HORIZON = {15: 0.5, 30: 0.5, 45: 0.2, 60: 0.2}
+# Puntos de accuracy promedio mínimos para justificar promover, por
+# horizonte — antes era un único 0.5 para los 4. Bajado a 0.2 SOLO en
+# +45/+60min (2026-09-29), con evidencia histórica real, no intuición:
+# revisando ~13 corridas de train.yml (27-29 sept, ejecucion_pipeline),
+# +45/+60min rechazaban una y otra vez candidatos con delta promedio
+# positivo (+0.09 a +0.31) y peor caída por estación MINÚSCULA (hasta
+# -0.06, muy por debajo de MAX_STATION_REGRESSION) — candidatos seguros,
+# bloqueados solo porque 0.5 era más estricto de lo necesario ahí. En
+# +15/+30min, en la misma ventana, el delta fue consistentemente NEGATIVO
+# (-0.26 a -0.47) — bajar el umbral ahí no habría cambiado nada bueno, así
+# que se dejan en 0.5 para no asumir un riesgo sin evidencia que lo respalde.
+
+MAX_STATION_REGRESSION = 4.0
 # Subido de 2.0 a 4.0 (2026-09-28): con 12 estaciones, el ruido normal de
 # volver a entrenar (random_state distinto, unos días más de datos) ya
 # produce una caída de 3-4 puntos en la estación más volátil AUNQUE el
@@ -49,7 +62,6 @@ MIN_IMPROVEMENT = 0.5  # puntos de accuracy promedio mínimos para justificar pr
 # desde que el champion actual quedó congelado (cutoff_train_fin ~04-06 de
 # septiembre), aunque el mundo real ya había cambiado bastante para
 # entonces (ver CHAMPION_FLOOR_ACCURACY_STATION más abajo).
-MAX_STATION_REGRESSION = 4.0
 # Si el champion YA está prediciendo mal en una estación (evaluado en vivo,
 # no su métrica vieja), no cuenta como "regresión bloqueante" que el
 # candidato también le vaya mal ahí — lo urgente es que el resto del
@@ -207,9 +219,10 @@ def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ
             if sid in champ_by_station and champ_by_station[sid] >= CHAMPION_FLOOR_ACCURACY_STATION
         }
         worst_station, worst_regression = min(regressions.items(), key=lambda kv: kv[1], default=(None, 0.0))
-        should_promote = delta >= MIN_IMPROVEMENT and worst_regression >= -MAX_STATION_REGRESSION
+        min_improvement = MIN_IMPROVEMENT_BY_HORIZON[horizon_min]
+        should_promote = delta >= min_improvement and worst_regression >= -MAX_STATION_REGRESSION
         reason = (
-            f"delta promedio={delta:+.2f} (umbral +{MIN_IMPROVEMENT}), "
+            f"delta promedio={delta:+.2f} (umbral +{min_improvement}), "
             f"peor caída por estación={worst_regression:+.2f} en {worst_station} "
             f"(tolerancia -{MAX_STATION_REGRESSION}, ignorando estaciones con champion ya < {CHAMPION_FLOOR_ACCURACY_STATION})"
         )
