@@ -6,36 +6,19 @@ desde ahí."""
 
 from src import pg_client as pg
 
-print("=== champion vigente ===")
-champions = pg.select_all("champion", order="horizon_min.asc")
-for row in champions:
-    print(row)
-
-print("\n=== accuracy operacional rolling_24h por estación (más reciente, TODAS las estaciones) ===")
-all_metrics = pg.select_all(
-    "operational_metric",
-    select="horizon_min,station_id,accuracy,n_evaluable,computed_at",
-    filters={"window_kind": "eq.rolling_24h"},
-    order="computed_at.desc",
-)
-if all_metrics:
-    latest_ts = all_metrics[0]["computed_at"]
-    latest = [r for r in all_metrics if r["computed_at"] == latest_ts and r["station_id"] is not None]
-    latest.sort(key=lambda r: r["accuracy"])
-    print(f"computed_at={latest_ts}")
-    for r in latest:
-        print(f"  {r['station_id']}  h{r['horizon_min']:>2}  accuracy={r['accuracy']:6.2f}  n={r['n_evaluable']}")
-
-print("\n=== promedio por estación (las 4 horizontes) ===")
-by_station = {}
-for r in latest:
-    by_station.setdefault(r["station_id"], []).append(r["accuracy"])
-for sid, accs in sorted(by_station.items(), key=lambda kv: sum(kv[1]) / len(kv[1])):
-    print(f"  {sid}: promedio={sum(accs)/len(accs):6.2f}  (n_horizontes={len(accs)})")
-
-print("\n=== metrica_validacion del champion vigente, TODAS las estaciones, h60 ===")
-champ_h60 = next((c for c in champions if c["horizon_min"] == 60), None)
-if champ_h60:
-    m = pg.select_all("metrica_validacion", filters={"model_id": f"eq.{champ_h60['model_id']}"})
-    for row in sorted(m, key=lambda r: (r["accuracy"] is None, r["accuracy"] or 0)):
-        print(f"  {row['station_id']}: accuracy={row['accuracy']:.2f}")
+for sid in ["02300", "05000", "07111"]:
+    print(f"\n=== {sid}: predicción (h60) vs real, últimas 20 ===")
+    preds = pg.select_all(
+        "prediccion",
+        select="target_timestamp,demanda_predicha",
+        filters={"station_id": f"eq.{sid}", "horizonte": "eq.4"},
+        order="target_timestamp.desc",
+    )[:20]
+    for p in preds:
+        obs = pg.select_one(
+            "observacion",
+            select="demand",
+            filters={"station_id": f"eq.{sid}", "observed_at": f"eq.{p['target_timestamp']}"},
+        )
+        real = obs["demand"] if obs else None
+        print(f"  {p['target_timestamp']}  predicho={p['demanda_predicha']:.1f}  real={real}")
