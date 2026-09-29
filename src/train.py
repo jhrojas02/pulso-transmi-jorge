@@ -107,6 +107,41 @@ def evaluate_by_station(test_df, y_pred):
     return pd.DataFrame(rows)
 
 
+DRIFT_RECENT_DAYS = 5  # "ahora" para la detección de quiebre: últimos 5 días
+DRIFT_LOOKBACK_DAYS = 19  # "antes" para comparar: los 14 días previos a esos 5
+# (día -19 a día -5 respecto al dato más reciente)
+DRIFT_THRESHOLD_PCT = 20.0  # cambio de nivel medio >=20% = quiebre real, no
+# ruido normal del ciclo diario/semanal (validado a mano el 2026-09-29:
+# 05100 -45.7%, 07111 +29.9%, 05000 +38.9% vs. el resto de estaciones
+# estables en ±1-17%, la mayoría bajo 13%)
+
+
+def detect_drifted_stations(observations, as_of, recent_days=DRIFT_RECENT_DAYS,
+                             lookback_days=DRIFT_LOOKBACK_DAYS, threshold_pct=DRIFT_THRESHOLD_PCT):
+    """Detección automática, por estación, de un quiebre reciente de nivel
+    de demanda: compara el promedio de los últimos `recent_days` contra el
+    de los `lookback_days - recent_days` anteriores a eso. Reemplaza tener
+    que detectar esto a mano estación por estación (así se encontró el
+    quiebre de 05100, y luego 07111/05000, el 2026-09-29) — se recalcula en
+    cada corrida de train.yml para que una estación nueva con quiebre se
+    trate igual sin tener que hardcodear su station_id."""
+    obs = observations.copy()
+    obs["observed_at"] = pd.to_datetime(obs["observed_at"], utc=True)
+    as_of = pd.Timestamp(as_of)
+    recent_cut = as_of - pd.Timedelta(days=recent_days)
+    lookback_cut = as_of - pd.Timedelta(days=lookback_days)
+
+    recent = obs[obs["observed_at"] > recent_cut]
+    older = obs[(obs["observed_at"] <= recent_cut) & (obs["observed_at"] > lookback_cut)]
+    recent_mean = recent.groupby("station_id")["demand"].mean()
+    older_mean = older.groupby("station_id")["demand"].mean()
+
+    common = recent_mean.index.intersection(older_mean.index)
+    pct_change = 100 * (recent_mean[common] - older_mean[common]) / older_mean[common]
+    drifted = pct_change[pct_change.abs() >= threshold_pct]
+    return drifted.round(1).to_dict()
+
+
 NAIVE_HALFLIFE_DAYS = 14  # a una observación de hace 14 días le pesa la mitad
 # que una de hoy; a las 4 semanas, un cuarto. Antes el naive promediaba TODO
 # el histórico por igual, así que un cambio real de régimen (ej. la caída
@@ -302,6 +337,13 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
     val_start = test_start - pd.Timedelta(days=VALIDATION_DAYS)
     station_categories = sorted(base["station_id"].unique().tolist())
 
+    drifted_stations = detect_drifted_stations(observations, max_date)
+    if drifted_stations:
+        print(f"Quiebre de demanda detectado (auto, últimos {DRIFT_RECENT_DAYS}d vs. los "
+              f"{DRIFT_LOOKBACK_DAYS - DRIFT_RECENT_DAYS}d previos): {drifted_stations}")
+        print("  -> solo diagnóstico por ahora (ver NOTA en run(): acortar la ventana de "
+              "entrenamiento para estas estaciones se probó y empeoró el resultado).")
+
     ARTIFACTS_DIR.mkdir(exist_ok=True)
     summary_rows = []
 
@@ -319,6 +361,17 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         val_df = df_h[(df_h["observed_at"] >= val_start) & (df_h["observed_at"] < test_start)]
         full_train_df = df_h[df_h["observed_at"] < test_start]  # train + validation
         test_df = df_h[df_h["observed_at"] >= test_start]
+
+        # NOTA (2026-09-29): se probó recortar fit_train_df/full_train_df a
+        # una ventana corta (14 días) SOLO para las estaciones con quiebre
+        # detectado, dejando val/test intactos — descartado tras backtest
+        # real (07111/05000/05100 vs. control 02300/03000): empeoró a las
+        # 5 estaciones, incluidas las que se quería arreglar (05100 +60min:
+        # 58.58 -> 54.52; 07111: 77.34 -> 75.21). El GBM ya captura el
+        # nivel reciente vía lag_1/rolling_mean_4h — quitarle historial
+        # solo le resta filas para aprender el patrón hora/día-de-semana,
+        # sin compensar con nada. Se mantiene detect_drifted_stations
+        # (diagnóstico útil, no dañino) pero no se aplica ningún recorte.
 
         # Paso 1 — elegir los pesos de mezcla por estación SOLO con
         # validación (fit_train_df -> predice val_df), nunca se toca
@@ -363,6 +416,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             "horizon_min": horizon_min,
             "n_train": len(full_train_df),
             "n_test": len(test_df),
+            "drifted_stations": drifted_stations,
             "winner_by_station": winner_by_station,
             "mix_weights_by_station": mix_weights_by_station,
             "naive_accuracy_mean_stations": naive_by_station["accuracy"].mean(),
