@@ -184,7 +184,15 @@ def gbm_candidate(train_df, test_df, station_categories):
             max_iter=2000,
             learning_rate=0.05,
             max_depth=8,
-            min_samples_leaf=15,
+            # Subido de 15 a 30 (2026-09-29): barrido validado con datos
+            # reales (07111, 02300, 03000, 4 horizontes c/u) — 15 sigue
+            # siendo el peor de todo el barrido (min_samples_leaf 15 a 70);
+            # 25-40 mejora de forma consistente y sin que ninguna estación
+            # empeore feo (promedio +0.05 a +0.18pts, vs. -27pts que dejó
+            # el boost dinámico que sí se descartó). Por encima de 40 el
+            # promedio ya empieza a caer (demasiada regularización) — 30
+            # queda en el centro de la zona que mejoró en el barrido.
+            min_samples_leaf=30,
             early_stopping=True,
             validation_fraction=0.1,
             n_iter_no_change=20,
