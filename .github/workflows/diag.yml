@@ -1,0 +1,23 @@
+name: pulso-transmi-diag
+
+# Diagnóstico puntual de solo lectura contra Neon (scripts/diag_check.py).
+# Solo workflow_dispatch, nunca se dispara solo. Nunca escribe nada —
+# existe porque el sandbox de desarrollo no tiene salida de red hacia
+# Neon y esta es la única forma de leerlo directo.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scripts.diag_check
