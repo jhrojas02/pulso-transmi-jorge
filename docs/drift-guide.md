@@ -114,6 +114,13 @@ hoy no generalizan pueden empezar a funcionar solas.
     sincronizadas — reacciona sin esperar al próximo reentrenamiento.
   Vigente solo en +15min: en horizontes más largos la señal de 4h ya no
   predice bien tan lejos mientras el quiebre sigue en movimiento.
+- **Umbral de promoción por horizonte** (`MIN_IMPROVEMENT_BY_HORIZON` en
+  `promote.py`, `{15: 0.5, 30: 0.5, 45: 0.2, 60: 0.2}`): en +45/+60min el
+  historial mostraba candidatos seguros (delta positivo, peor caída por
+  estación minúscula) rechazados una y otra vez solo por un umbral de 0.5
+  más estricto de lo necesario ahí. En +15/+30min el delta históricamente
+  es negativo, así que ahí se deja en 0.5 — no hay evidencia que respalde
+  bajarlo en esos dos horizontes.
 
 ## 3. Cómo validar cualquier cambio nuevo (antes de tocar producción)
 
@@ -157,7 +164,7 @@ Reglas prácticas que ayudan a no sobreajustar:
   sección 2).
 - `src/pipeline/promote.py`: reentrena candidato con TODO el histórico,
   compara contra champion vigente evaluado EN VIVO (nunca contra su
-  métrica vieja), decide promoción con `MIN_IMPROVEMENT` +
+  métrica vieja), decide promoción con `MIN_IMPROVEMENT_BY_HORIZON` +
   `MAX_STATION_REGRESSION` + `CHAMPION_FLOOR_ACCURACY_STATION`. Corre en
   `train.yml` (cron + trigger por drift desde `monitor.py`).
 - `src/pipeline/submit_current_cycle.py`: sync incremental + inferencia
@@ -167,21 +174,48 @@ Reglas prácticas que ayudan a no sobreajustar:
   ventanas `cumulative`/`rolling_24h`), dispara `train.yml` antes de
   tiempo si detecta drift fuerte.
 
-## 5. Ideas pendientes / no exploradas
+## 5. Ideas ya exploradas (para no repetirlas sin nueva evidencia)
 
-- Verificar cada tanto si las estaciones con quiebre mejoran solas con
-  más ciclos de reentrenamiento (la ventana de val/test se desliza hacia
-  adelante y va incluyendo más días del régimen nuevo con el tiempo).
-- Explorar si hay ganancia adicional en las estaciones SIN quiebre —
-  tienen suficiente historial para experimentar con mucho menos riesgo de
-  sobreajuste.
-- Relajar el candado de promoción (`MIN_IMPROVEMENT`) para reaccionar más
-  rápido a quiebres futuros es una palanca real, pero a costa de más
-  riesgo — requiere backtest explícito antes de aplicarlo (ver sección 3).
-- No se exploró a fondo que la demanda es sintética con seed conocido —
-  podría haber patrón determinístico reverse-engenieerable.
+- **Mejora natural con el tiempo**: revisado, todavía sin cambio (el reloj
+  virtual avanza poco por sesión) — hay que volver a revisar en un lapso
+  de días reales, no horas, antes de sacar conclusión.
+- **Ganancia en estaciones sin quiebre**: revisado, **sin margen real**.
+  El CV (variación relativa) de la demanda dentro del mismo slot exacto de
+  15min/día-de-semana ya es ~16-20% en estaciones estables — coincide casi
+  exactamente con el accuracy que ya se logra (80-86%). Es ruido genuino,
+  no algo que el modelo esté dejando pasar.
+- **Relajar el candado de promoción**: aplicado de forma acotada, ver
+  sección 2 (`MIN_IMPROVEMENT_BY_HORIZON`) — no como relajación general,
+  sino solo donde el historial mostró evidencia de candidatos seguros
+  bloqueados.
+- **Seed sintético / patrón determinístico**: revisado, **sin estructura
+  explotable**. La variación dentro de un slot exacto es ruido real (ver
+  arriba), y los residuos entre estaciones en el mismo instante no están
+  correlacionados (probado 02300 vs 03000: correlación -0.11, nula) — no
+  hay un shock compartido ni un patrón determinístico accesible sin el
+  código fuente del generador.
 
-## 6. Cómo retomar
+## 6. Qué NO vale la pena repetir en features/modelo (probado y descartado)
+
+- Modelo GBM separado solo para estaciones con quiebre (sin las estables
+  compartiendo splits): empeora, pierde generalización del patrón
+  hora/día.
+- Más capacidad de modelo (árboles más profundos, más iteraciones): ruido
+  puro, sin ganancia consistente — el modelo no está limitado por
+  capacidad.
+- Feature de corredor (categórica estática): ruido, sin patrón.
+- Feature de demanda de la estación "hermana" del mismo corredor en
+  tiempo real: ruido, a veces empeora — la hipótesis de redistribución de
+  demanda entre estaciones adyacentes es plausible como explicación, pero
+  no hay evidencia suficiente (pocos días) para que el modelo la aprenda
+  sin sobreajustar.
+- Extender el boost reactivo de la sección 2 a +30min con cualquier
+  combinación de umbral/intensidad: al menos una estación con quiebre
+  queda negativa en TODO el barrido — la señal de persistencia de 4h no
+  predice bien tan lejos en un horizonte donde el quiebre sigue en
+  movimiento.
+
+## 7. Cómo retomar
 
 1. Leer este archivo completo primero.
 2. `git log --oneline -20` en `main` para ver el estado exacto de commits.
