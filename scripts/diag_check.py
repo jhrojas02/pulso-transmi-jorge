@@ -7,28 +7,35 @@ desde ahí."""
 from src import pg_client as pg
 
 print("=== champion vigente ===")
-for row in pg.select_all("champion", order="horizon_min.asc"):
+champions = pg.select_all("champion", order="horizon_min.asc")
+for row in champions:
     print(row)
 
-print("\n=== accuracy operacional rolling_24h, estación 05100 ===")
-rows = pg.select_all(
+print("\n=== accuracy operacional rolling_24h por estación (más reciente, TODAS las estaciones) ===")
+all_metrics = pg.select_all(
     "operational_metric",
-    select="horizon_min,accuracy,n_evaluable,computed_at",
-    filters={"window_kind": "eq.rolling_24h", "station_id": "eq.05100"},
+    select="horizon_min,station_id,accuracy,n_evaluable,computed_at",
+    filters={"window_kind": "eq.rolling_24h"},
     order="computed_at.desc",
 )
-for row in rows[:8]:
-    print(row)
+if all_metrics:
+    latest_ts = all_metrics[0]["computed_at"]
+    latest = [r for r in all_metrics if r["computed_at"] == latest_ts and r["station_id"] is not None]
+    latest.sort(key=lambda r: r["accuracy"])
+    print(f"computed_at={latest_ts}")
+    for r in latest:
+        print(f"  {r['station_id']}  h{r['horizon_min']:>2}  accuracy={r['accuracy']:6.2f}  n={r['n_evaluable']}")
 
-print("\n=== metrica_validacion del último champion de cada horizonte, estación 05100 ===")
-for champ in pg.select_all("champion", order="horizon_min.asc"):
-    m = pg.select_all(
-        "metrica_validacion",
-        filters={"model_id": f"eq.{champ['model_id']}", "station_id": "eq.05100"},
-    )
-    print(f"horizon={champ['horizon_min']} model_id={champ['model_id']}: {m}")
+print("\n=== promedio por estación (las 4 horizontes) ===")
+by_station = {}
+for r in latest:
+    by_station.setdefault(r["station_id"], []).append(r["accuracy"])
+for sid, accs in sorted(by_station.items(), key=lambda kv: sum(kv[1]) / len(kv[1])):
+    print(f"  {sid}: promedio={sum(accs)/len(accs):6.2f}  (n_horizontes={len(accs)})")
 
-print("\n=== última observación de 05100 en Neon (confirma que sigue creciendo) ===")
-last_obs = pg.select_top("observacion", filters={"station_id": "eq.05100"}, order="observed_at.desc", limit=3)
-for row in last_obs:
-    print(row)
+print("\n=== metrica_validacion del champion vigente, TODAS las estaciones, h60 ===")
+champ_h60 = next((c for c in champions if c["horizon_min"] == 60), None)
+if champ_h60:
+    m = pg.select_all("metrica_validacion", filters={"model_id": f"eq.{champ_h60['model_id']}"})
+    for row in sorted(m, key=lambda r: (r["accuracy"] is None, r["accuracy"] or 0)):
+        print(f"  {row['station_id']}: accuracy={row['accuracy']:.2f}")
