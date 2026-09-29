@@ -43,21 +43,23 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.features import build_feature_frame, shift_target_for_horizon
 
-# Bajados de 7+7=14 a 3+2=5 días de rezago (2026-09-29): con el rezago
-# viejo, el corte de entrenamiento (cutoff_train_fin = max_date - TEST_DAYS)
-# queda TAN atrás que nunca alcanza a incluir un quiebre real de demanda
-# reciente como training data — solo lo ve como "test", nunca como
-# ejemplo del que aprender. Caso real: la caída de 05100 (13-15 sep) seguía
-# sin aparecer en el training set de los candidatos entrenados el 29 sep
-# (2 semanas después), con el candado de promoción ya arreglado y sin
-# ningún candidato promovido porque, literalmente, ninguno había tenido
-# la oportunidad de aprender el nuevo nivel de demanda. Con 5 días de
-# rezago en vez de 14, el corte alcanza la caída ~9 días de reloj virtual
-# antes. Costo aceptado: la ventana de test queda más chica (menos
-# robustez estadística en la métrica reportada) — aceptable frente a una
-# estación con accuracy de un dígito en producción ahora mismo.
-TEST_DAYS = 3
-VALIDATION_DAYS = 2
+# REVERTIDO a 7+7=14 el mismo día (2026-09-29): se probó bajar a 3+2=5 para
+# que el entrenamiento alcanzara más rápido un quiebre real de demanda
+# (05100), y sí ayudó a ESO — pero con solo 3 días de test (~288 filas por
+# estación) la estimación de "delta promedio" que decide la promoción
+# (MIN_IMPROVEMENT=0.5 en promote.py) quedó tan ruidosa que empezó a dejar
+# pasar candidatos peores por pura casualidad estadística: el champion de
+# 03000 (estación ESTABLE, sin ningún quiebre) decía 83-85% en su propia
+# métrica de test, pero cayó a 68.5% en accuracy operacional real unas
+# horas después de promovido — confirmado comparando metrica_validacion
+# contra operational_metric el mismo día. Combinado con que monitor.py
+# dispara train.yml cada ~30 min por drift (el propio ruido alimentaba más
+# drift, que disparaba más reentrenos), esto empeoró el accuracy real en
+# la mayoría de las estaciones, no solo en la que se quería arreglar. La
+# ventana de 14 días es más lenta para alcanzar un quiebre nuevo, pero la
+# fiabilidad de la decisión de promoción importa más que la velocidad.
+TEST_DAYS = 7
+VALIDATION_DAYS = 7
 HORIZONS_MIN = [15, 30, 45, 60]
 FEATURE_COLS = [
     "station_id", "hour", "day_of_week", "is_weekend",
