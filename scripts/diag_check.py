@@ -1,24 +1,19 @@
-"""Diagnóstico puntual de solo lectura contra Neon (DATABASE_URL) — se
-corre desde .github/workflows/diag.yml. No escribe nada."""
+"""Diagnóstico puntual de solo lectura contra la API oficial — se corre
+desde .github/workflows/diag.yml. No escribe nada."""
 
-from src import pg_client as pg
+import os
 
-print("=== metrica_validacion del champion vigente para 03000 (control estable) ===")
-champions = pg.select_all("champion", order="horizon_min.asc")
-for champ in champions:
-    m = pg.select_one(
-        "metrica_validacion",
-        filters={"model_id": f"eq.{champ['model_id']}", "station_id": "eq.03000"},
-    )
-    print(f"horizon={champ['horizon_min']} model_id={champ['model_id']}: {m}")
+import requests
 
-print("\n=== historial reciente de ejecucion_pipeline (decisiones de promote.py) ===")
-runs = pg.select_all(
-    "ejecucion_pipeline",
-    select="run_id,run_at,motivo_decision",
-    order="run_at.desc",
-)
-runs = [r for r in runs if r["motivo_decision"] and "promoted" in r["motivo_decision"]][:6]
-for r in runs:
-    print(f"\n--- {r['run_at']} ---")
-    print(r["motivo_decision"][:1500])
+API_BASE = "https://pulso-transmi.72-60-245-2.sslip.io"
+API_KEY = os.environ.get("PULSO_API_KEY", "")
+headers = {"Authorization": f"Bearer {API_KEY}"}
+
+print("=== /v1/me ===")
+r = requests.get(f"{API_BASE}/v1/me", headers=headers, timeout=15)
+print(r.status_code, r.text[:2000])
+
+for window in ["cumulative", "rolling_24h"]:
+    print(f"\n=== /v1/leaderboard?window={window} ===")
+    r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": window}, headers=headers, timeout=15)
+    print(r.status_code, r.text[:4000])
