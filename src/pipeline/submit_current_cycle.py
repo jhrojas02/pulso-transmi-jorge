@@ -32,6 +32,7 @@ import pandas as pd
 import requests
 
 from src import supabase_client as sb
+from src import train as train_mod
 from src.features import build_feature_frame, climatological_context, estimate_context_row, target_time_features
 from src.pipeline.sync import sync_observations_from_saved_cursor
 from src.train import FEATURE_COLS, weighted_naive_tables
@@ -202,11 +203,17 @@ def build_features_as_of(data_cutoff, targets):
     ctx_df = pd.DataFrame(context)
     base = build_feature_frame(obs_df, ctx_df)
 
+    # Se recalcula en cada ciclo (cada 10 min) con las observaciones recién
+    # sincronizadas, no solo en cada reentrenamiento — así el boost
+    # reactivo de predict_targets() reacciona tan rápido como llegan datos
+    # nuevos, sin esperar al próximo train.yml (ver train.compute_fast_boost).
+    drifted_stations = train_mod.detect_drifted_stations(obs_df, cutoff_ts)
+
     cutoff_rows = base[base["observed_at"] == cutoff_ts]
-    return {row["station_id"]: row for _, row in cutoff_rows.iterrows()}, base
+    return {row["station_id"]: row for _, row in cutoff_rows.iterrows()}, base, drifted_stations
 
 
-def predict_targets(model, cutoff_row_by_station, targets):
+def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None):
     """Por cada target combina la fila de features del cutoff (lags,
     rolling, clima — lo que se sabe HOY) con target_hour/target_day_of_week
     calculados directo de `target_at` (lo único que describe el momento
@@ -215,7 +222,9 @@ def predict_targets(model, cutoff_row_by_station, targets):
     Mezcla naive, fast (persistencia rolling_mean_4h) y GBM con los pesos
     congelados por estación (ver train.hybrid_predict) en vez de elegir uno
     solo — mismo criterio que usó el entrenamiento para esta versión de
-    champion."""
+    champion. `drifted_stations` (recalculado en cada ciclo, ver
+    build_features_as_of) suma el boost reactivo de
+    train_mod.compute_fast_boost, igual que en train.py/promote.py."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     predictions = []
@@ -236,6 +245,9 @@ def predict_targets(model, cutoff_row_by_station, targets):
 
         mix = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, {"gbm": 0.0, "fast": 0.0})
         w_gbm, w_fast = mix["gbm"], mix["fast"]
+        if drifted_stations and sid in drifted_stations:
+            boost = train_mod.compute_fast_boost([naive_value], [fast_value], [True], horizon_min)[0]
+            w_fast = min(w_fast + boost, 1.0 - w_gbm)
         feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)
         has_nan_features = any(pd.isna(combined.get(c)) for c in feature_cols)
         if w_gbm > 0 and horizon_min in model["models"] and not has_nan_features:
@@ -378,8 +390,10 @@ def main():
         print(f"Ya existe recibo para {cycle['cycle_id']} + {model['version']}. Fin correcto (sin reenviar).")
         return
 
-    cutoff_row_by_station, base = build_features_as_of(cycle["data_cutoff"], cycle["targets"])
+    cutoff_row_by_station, base, drifted_stations = build_features_as_of(cycle["data_cutoff"], cycle["targets"])
     print(f"Estaciones con feature_row en data_cutoff: {len(cutoff_row_by_station)}/12")
+    if drifted_stations:
+        print(f"Quiebre de demanda detectado (auto): {drifted_stations}")
 
     # Misma función que usa train.py (weighted_naive_tables) para que el
     # naive en vivo pondere por recencia igual que el que se evaluó y
@@ -388,7 +402,7 @@ def main():
     # producción una vez (ver feature_cols_by_horizon más arriba).
     model["_naive_lookup"], model["_naive_station_mean"] = weighted_naive_tables(base, "hour", "day_of_week")
 
-    predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"])
+    predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"], drifted_stations=drifted_stations)
 
     try:
         validate_exact_targets(predictions, cycle["targets"])

@@ -107,12 +107,18 @@ def load_champion_bundle(horizon_min):
     }
 
 
-def champion_accuracy_on(champ_bundle, train_df, test_df):
+def champion_accuracy_on(champ_bundle, train_df, test_df, drifted_stations=None, horizon_min=None):
     """Reconstruye la predicción híbrida EXACTA del champion (su modelo GBM
     congelado + sus pesos de mezcla naive/fast/gbm por estación, también
     congelados) pero prediciendo sobre la ventana de test de HOY. Así el
     delta contra el candidato es una comparación real, no contra un número
-    viejo."""
+    viejo.
+
+    `drifted_stations`/`horizon_min` se pasan igual que al candidato (ver
+    train_mod.hybrid_predict / compute_fast_boost) para que el boost
+    reactivo aplique parejo en ambos lados — comparar un candidato CON
+    boost contra un champion SIN boost inflaría el delta de forma
+    artificial."""
     if champ_bundle is None:
         return None, {}
     naive_pred = train_mod.naive_baseline(train_df, test_df)
@@ -120,7 +126,8 @@ def champion_accuracy_on(champ_bundle, train_df, test_df):
     X_test = test_df[champ_bundle["feature_cols"]].copy()
     X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=champ_bundle["station_categories"])
     gbm_pred = np.clip(champ_bundle["model"].predict(X_test), 0, None)
-    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, champ_bundle["mix_weights_by_station"])
+    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, champ_bundle["mix_weights_by_station"],
+                                            drifted_stations=drifted_stations, horizon_min=horizon_min)
     by_station = train_mod.evaluate_by_station(test_df, hybrid_pred)
     overall = by_station["accuracy"].mean()
     return overall, dict(zip(by_station["station_id"], by_station["accuracy"]))
@@ -245,7 +252,10 @@ def main():
         model_id, agg_acc = register_candidate(horizon_min, row, code_commit, version, cutoff_inicio, cutoff_fin)
 
         champ_bundle = load_champion_bundle(horizon_min)
-        champ_accuracy_mean, champ_by_station = champion_accuracy_on(champ_bundle, row["_full_train_df"], row["_test_df"])
+        champ_accuracy_mean, champ_by_station = champion_accuracy_on(
+            champ_bundle, row["_full_train_df"], row["_test_df"],
+            drifted_stations=row["drifted_stations"], horizon_min=horizon_min,
+        )
 
         promoted, reason = decide_and_promote(horizon_min, model_id, row, champ_accuracy_mean, champ_by_station)
         decisions.append({"horizon_min": horizon_min, "model_id": model_id, "accuracy": agg_acc, "promoted": promoted, "reason": reason})

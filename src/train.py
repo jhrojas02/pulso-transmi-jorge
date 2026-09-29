@@ -295,25 +295,56 @@ def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1):
     return weights_by_station
 
 
-def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station):
+FAST_BOOST_HORIZONS = {15}  # único horizonte donde el boost mejoró LIMPIO en
+# las 3 estaciones con quiebre (backtest real 2026-09-29, 07111/05000/05100
+# vs. control 02300/03000). A +30min ya es mixto (05100 mejora pero
+# 05000/07111 empeoran) y a +45/+60min empeora derecho: la señal de 4h no
+# predice bien tan lejos mientras el quiebre sigue en movimiento (ej. 05000
+# casi se cuadruplicó en un solo día) — se deja el comportamiento normal en
+# esos 3 horizontes.
+FAST_BOOST_THRESHOLD = 0.10  # desviación mínima (10%) de fast vs. naive para
+# activar el boost — validado en el mismo backtest, poco sensible entre 0 y
+# 0.15.
+FAST_BOOST_K = 0.5  # cuánto w_fast se suma por cada punto de desviación por
+# encima del umbral (capado a 1.0). Con k=0.5 la ganancia neta en las 3
+# estaciones con quiebre fue la mejor combinada en el barrido de horizonte
+# 15/30min; k=1.0 gana un poco más en 05100 pero un poco menos en las otras
+# dos, casi empatado — se deja 0.5 como punto medio razonable.
+
+
+def compute_fast_boost(naive_pred, fast_pred, is_drifted, horizon_min):
+    """Boost adicional a w_fast, SOLO para filas de estaciones con quiebre
+    de demanda ya confirmado (`is_drifted`, ver detect_drifted_stations —
+    exige un cambio sostenido de nivel medio en >=5 días, nunca un pico
+    puntual) y SOLO en +15/+30min (ver FAST_BOOST_HORIZONS). Reemplaza el
+    boost dinámico descartado el 2026-09-28 (comparaba contra
+    rolling_mean_24h y confundía cualquier hora pico con una emergencia,
+    -27 puntos en 03000 estable) — este compara contra naive_pred, que ya
+    es el nivel esperado PARA ESA hora/día (no un promedio plano), y además
+    solo se activa en estaciones ya confirmadas con quiebre, así que nunca
+    dispara por el ruido normal de una estación estable. Validado en
+    backtest real: con el gate por estación, las estables quedan en 0.0 de
+    cambio SIEMPRE (ver notas 2026-09-29)."""
+    if horizon_min not in FAST_BOOST_HORIZONS:
+        return np.zeros(len(np.asarray(naive_pred)))
+    naive_pred = np.asarray(naive_pred, dtype=float)
+    fast_pred = np.asarray(fast_pred, dtype=float)
+    naive_safe = np.where(naive_pred == 0, np.nan, naive_pred)
+    dev = np.nan_to_num((fast_pred - naive_pred) / naive_safe, nan=0.0)
+    boost = np.clip(np.abs(dev) - FAST_BOOST_THRESHOLD, 0, None) * FAST_BOOST_K
+    return np.where(np.asarray(is_drifted), np.clip(boost, 0, 1.0), 0.0)
+
+
+def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                    drifted_stations=None, horizon_min=None):
     """Mezcla los 3 candidatos por estación según mix_weights_by_station
     ({"gbm": w_gbm, "fast": w_fast}, peso naive implícito = 1-w_gbm-w_fast)
     — ver blend_weights_3way.
 
-    Nota (2026-09-28): se probó y se descartó un boost dinámico que subía
-    w_fast en caliente según qué tan lejos estaba rolling_mean_4h de
-    rolling_mean_24h en la fila que se predice, para reaccionar sin
-    esperar a que una futura ventana de validación "se entere" de un
-    quiebre real (el peso base sí tiene ese rezago — ver blend_weights_3way).
-    Empeoraba MUCHO en estaciones sin quiebre (validado con datos reales:
-    -27 puntos en 03000, estación estable) porque rolling_mean_4h se
-    desvía de rolling_mean_24h todo el tiempo por el ciclo normal de
-    horas pico/valle — esa señal no distingue estacionalidad esperada de
-    un quiebre real de régimen, así que confundía casi cualquier hora
-    pico con una "emergencia". Para hacer esto bien haría falta comparar
-    contra el nivel esperado a ESA hora (no contra el promedio de 24h
-    parejo), que es justo el problema que ya resuelve naive_baseline —
-    quedó pendiente como Fase 2 en vez de forzarlo a medias."""
+    `drifted_stations`/`horizon_min` son opcionales: si se pasan, se suma
+    el boost reactivo de compute_fast_boost por encima del peso base —
+    ver esa función para el porqué y las salvaguardas. Sin ellos (default),
+    el comportamiento es idéntico al de antes de 2026-09-29."""
     naive_pred, fast_pred, gbm_pred = np.asarray(naive_pred), np.asarray(fast_pred), np.asarray(gbm_pred)
     if mix_weights_by_station:
         n = len(mix_weights_by_station)
@@ -326,6 +357,10 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     sids = test_df["station_id"]
     w_gbm = sids.map(lambda s: mix_weights_by_station.get(s, default)["gbm"]).to_numpy()
     w_fast = sids.map(lambda s: mix_weights_by_station.get(s, default)["fast"]).to_numpy()
+    if drifted_stations and horizon_min is not None:
+        is_drifted = sids.isin(drifted_stations).to_numpy()
+        boost = compute_fast_boost(naive_pred, fast_pred, is_drifted, horizon_min)
+        w_fast = np.clip(w_fast + boost, 0, 1.0 - w_gbm)
     w_naive = 1.0 - w_gbm - w_fast
     return w_naive * naive_pred + w_fast * fast_pred + w_gbm * gbm_pred
 
@@ -400,7 +435,8 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         gbm_by_station = evaluate_by_station(test_df, gbm_pred)
         gbm_overall_wape, gbm_overall_acc = wape_accuracy(test_df["target_demand"], gbm_pred)
 
-        hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station)
+        hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                                      drifted_stations=drifted_stations, horizon_min=horizon_min)
         hybrid_by_station = evaluate_by_station(test_df, hybrid_pred)
         hybrid_overall_wape, hybrid_overall_acc = wape_accuracy(test_df["target_demand"], hybrid_pred)
 
