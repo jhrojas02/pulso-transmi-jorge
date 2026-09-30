@@ -438,16 +438,22 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     `drifted_stations`/`horizon_min` son opcionales: si se pasan, se suma
     el boost reactivo de compute_fast_boost por encima del peso base —
     ver esa función para el porqué y las salvaguardas. `boost_fast_pred`
-    (por defecto, la extrapolación de tendencia de
-    `trend_extrapolated_signal(lag_1, lag_2, horizon_steps)` si hay
-    horizon_min y ambos lags disponibles; si no, cae a lag_1 puro, y si
-    tampoco hay lag_1 cae a `fast_pred`) es la señal que usa SOLO el
-    boost — separada de `fast_pred` (rolling_mean_4h, sigue igual que
-    siempre en la mezcla base) para no tocar el comportamiento ya
-    validado de las estaciones estables, que nunca pasan por el boost."""
+    (por defecto, la extrapolación de tendencia SUAVIZADA de
+    `trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps)` si
+    hay horizon_min y ambos lags disponibles — 2026-09-30, cambiado de la
+    versión de 2 puntos tras backtest real: la suavizada ganó en LOS 24
+    pares estación×horizonte con quiebre, a veces por >15 puntos (un solo
+    par de lags es demasiado ruidoso en estaciones volátiles como 05100);
+    si no, cae a lag_1 puro, y si tampoco hay lag_1 cae a `fast_pred`) es
+    la señal que usa SOLO el boost — separada de `fast_pred`
+    (rolling_mean_4h, sigue igual que siempre en la mezcla base) para no
+    tocar el comportamiento ya validado de las estaciones estables, que
+    nunca pasan por el boost."""
     naive_pred, fast_pred, gbm_pred = np.asarray(naive_pred), np.asarray(fast_pred), np.asarray(gbm_pred)
     if boost_fast_pred is None:
-        if "lag_1" in test_df.columns and "lag_2" in test_df.columns and horizon_min is not None:
+        if "lag_1" in test_df.columns and "lag_1h" in test_df.columns and horizon_min is not None:
+            boost_fast_pred = trend_extrapolated_signal_smoothed(test_df["lag_1"], test_df["lag_1h"], horizon_min // 15)
+        elif "lag_1" in test_df.columns and "lag_2" in test_df.columns and horizon_min is not None:
             boost_fast_pred = trend_extrapolated_signal(test_df["lag_1"], test_df["lag_2"], horizon_min // 15)
         elif "lag_1" in test_df.columns:
             boost_fast_pred = test_df["lag_1"].to_numpy()
@@ -579,19 +585,14 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         # y predict_targets en submit_current_cycle.py.
         hybrid_pred_sin_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station)
         hybrid_acc_sin_boost = evaluate_by_station(test_df, hybrid_pred_sin_boost).set_index("station_id")["accuracy"]
+        # boost_fast_pred usa por defecto la pendiente SUAVIZADA (1h, 4 pasos,
+        # ver trend_extrapolated_signal_smoothed) — ganó en los 24 pares
+        # estación×horizonte con quiebre en el backtest real de 2026-09-30,
+        # a veces por >15 puntos, frente a la pendiente de un solo par de lags
+        # (demasiado ruidosa para estaciones como 05100 en plena caída).
         hybrid_pred_con_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                                 drifted_stations=drifted_stations, horizon_min=horizon_min)
         hybrid_acc_con_boost = evaluate_by_station(test_df, hybrid_pred_con_boost).set_index("station_id")["accuracy"]
-        # Comparación puntual (2026-09-30, NO afecta producción todavía):
-        # misma autovalidación pero con la pendiente SUAVIZADA (1h, 4 pasos)
-        # en vez de la de un solo par de lags — ver
-        # trend_extrapolated_signal_smoothed para el motivo (05100 es muy
-        # ruidosa paso a paso incluso en plena caída).
-        smoothed_signal = trend_extrapolated_signal_smoothed(test_df["lag_1"], test_df["lag_1h"], horizon_min // 15)
-        hybrid_pred_con_boost_smooth = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                                                        drifted_stations=drifted_stations, horizon_min=horizon_min,
-                                                        boost_fast_pred=smoothed_signal)
-        hybrid_acc_con_boost_smooth = evaluate_by_station(test_df, hybrid_pred_con_boost_smooth).set_index("station_id")["accuracy"]
         boost_validated_stations = {
             sid: drifted_stations[sid] for sid in drifted_stations
             if sid in hybrid_acc_con_boost.index and hybrid_acc_con_boost[sid] > hybrid_acc_sin_boost[sid]
@@ -600,24 +601,13 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             print(f"  -> boost validado con backtest real en este mismo test: "
                   f"{list(boost_validated_stations)} SÍ mejoran, "
                   f"{[s for s in drifted_stations if s not in boost_validated_stations]} NO (se dejan sin boost)")
-            # Diagnóstico puntual (2026-09-30, evaluando trend_extrapolated_signal
-            # vs. lag_1 puro): accuracy sin boost vs con boost por estación con
-            # quiebre, para verificar en los logs de train.yml si la extrapolación
-            # de tendencia mejora las que seguían mal (05100, 03000) sin romper
-            # las que el boost anterior ya arreglaba (02300, 05000, 07111).
             for sid in drifted_stations:
                 if sid in hybrid_acc_sin_boost.index and sid in hybrid_acc_con_boost.index:
                     w = mix_weights_by_station.get(sid, {"gbm": 0.0, "fast": 0.0})
                     room = max(0.0, 1.0 - w["gbm"] - w["fast"])
                     print(f"     {sid}: sin_boost={hybrid_acc_sin_boost[sid]:.2f}  "
-                          f"2pts={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
-                          f"suavizado_1h={hybrid_acc_con_boost_smooth[sid]:.2f} ({hybrid_acc_con_boost_smooth[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
+                          f"con_boost={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
                           f"w_gbm={w['gbm']:.2f} w_fast={w['fast']:.2f} espacio_boost={room:.2f}")
-
-            # Barrido de threshold/k (2026-09-30): probado, ganancia marginal
-            # (+0.05 a +0.11, insuficiente por sí sola para +15min) — no vale
-            # la pena seguir pagando el costo de cómputo en cada corrida.
-            # Detalle en el historial de commits si hace falta retomarlo.
 
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                       drifted_stations=boost_validated_stations, horizon_min=horizon_min)
