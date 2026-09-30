@@ -352,7 +352,7 @@ FAST_BOOST_K = 0.5  # cuánto w_fast se suma por cada punto de desviación por
 # encima del umbral (capado a 1.0).
 
 
-def compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min):
+def compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min, threshold=None, k=None):
     """Boost adicional a w_fast, SOLO para filas de estaciones con quiebre
     de demanda ya confirmado (`is_drifted`, ver detect_drifted_stations).
     Reemplaza el boost dinámico descartado el 2026-09-28 (comparaba contra
@@ -373,16 +373,19 @@ def compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min):
     donde rolling_mean_4h como señal del boost empeoraba."""
     if horizon_min not in FAST_BOOST_HORIZONS:
         return np.zeros(len(np.asarray(naive_pred)))
+    threshold = FAST_BOOST_THRESHOLD if threshold is None else threshold
+    k = FAST_BOOST_K if k is None else k
     naive_pred = np.asarray(naive_pred, dtype=float)
     boost_fast_pred = np.asarray(boost_fast_pred, dtype=float)
     naive_safe = np.where(naive_pred == 0, np.nan, naive_pred)
     dev = np.nan_to_num((boost_fast_pred - naive_pred) / naive_safe, nan=0.0)
-    boost = np.clip(np.abs(dev) - FAST_BOOST_THRESHOLD, 0, None) * FAST_BOOST_K
+    boost = np.clip(np.abs(dev) - threshold, 0, None) * k
     return np.where(np.asarray(is_drifted), np.clip(boost, 0, 1.0), 0.0)
 
 
 def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                    drifted_stations=None, horizon_min=None, boost_fast_pred=None):
+                    drifted_stations=None, horizon_min=None, boost_fast_pred=None,
+                    boost_threshold=None, boost_k=None):
     """Mezcla los 3 candidatos por estación según mix_weights_by_station
     ({"gbm": w_gbm, "fast": w_fast}, peso naive implícito = 1-w_gbm-w_fast)
     — ver blend_weights_3way.
@@ -426,7 +429,8 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     w_gbm_eff = w_gbm
     if drifted_stations and horizon_min is not None:
         is_drifted = sids.isin(drifted_stations).to_numpy()
-        w_boost = compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min)
+        w_boost = compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min,
+                                      threshold=boost_threshold, k=boost_k)
         # El boost puede comerle espacio a w_gbm (no solo al sobrante de
         # 1-w_gbm-w_fast) — 2026-09-30, diagnosticado con datos reales:
         # blend_weights_3way elige w_gbm en validación, ANTES de que el
@@ -553,6 +557,32 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
                     print(f"     {sid}: sin_boost={hybrid_acc_sin_boost[sid]:.2f}  "
                           f"con_boost={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
                           f"w_gbm={w['gbm']:.2f} w_fast={w['fast']:.2f} espacio_boost={room:.2f}")
+
+            # Barrido puntual (2026-09-30, NO afecta producción todavía):
+            # +15min quedó a centésimas del umbral de promoción varias
+            # corridas seguidas — antes de tocar las constantes globales
+            # (que también rigen +30/45/60, ya promovidos y funcionando),
+            # se prueban varias combinaciones (threshold, k) EN EL MISMO
+            # backtest para ver si alguna cierra la brecha sin
+            # necesidad de adivinar.
+            if horizon_min == 15:
+                print("     --- barrido threshold/k (solo diagnóstico) ---")
+                for th, k in [(0.10, 0.5), (0.05, 0.5), (0.10, 0.8), (0.05, 0.8), (0.02, 1.0), (0.10, 0.3)]:
+                    pred_variant = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                                                   drifted_stations=drifted_stations, horizon_min=horizon_min,
+                                                   boost_threshold=th, boost_k=k)
+                    acc_variant = evaluate_by_station(test_df, pred_variant)
+                    # Solo cuentan estaciones donde ESTA variante mejora sobre sin_boost
+                    # (autovalidación por estación, igual que la versión real)
+                    variant_by_sid = acc_variant.set_index("station_id")["accuracy"]
+                    validated_variant = [sid for sid in drifted_stations
+                                          if sid in variant_by_sid.index and sid in hybrid_acc_sin_boost.index
+                                          and variant_by_sid[sid] > hybrid_acc_sin_boost[sid]]
+                    pred_final_variant = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                                                         drifted_stations=validated_variant, horizon_min=horizon_min,
+                                                         boost_threshold=th, boost_k=k)
+                    mean_acc = evaluate_by_station(test_df, pred_final_variant)["accuracy"].mean()
+                    print(f"     threshold={th} k={k}: hybrid_mean={mean_acc:.2f}  validadas={validated_variant}")
 
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                       drifted_stations=boost_validated_stations, horizon_min=horizon_min)
