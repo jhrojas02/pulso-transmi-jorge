@@ -281,16 +281,18 @@ def naive_fast_baseline(df):
     return df["rolling_mean_4h"].to_numpy()
 
 
-MAX_GBM_WEIGHT_DRIFTED = 0.5  # tope al w_gbm que puede elegir el grid search
-# para estaciones YA detectadas con quiebre (ver detect_drifted_stations),
-# calculado ANTES de este grid search con el histórico completo — 2026-09-30,
-# diagnosticado con datos reales: sin este tope, el grid search de VALIDACIÓN
-# (que termina antes de que el quiebre grande ocurriera) elegía w_gbm=0.70-0.80
-# para estaciones como 05000/05100, dejando muy poco margen de entrada tanto
-# para el naive/fast base como para el boost reactivo que se suma después
-# (ver hybrid_predict). Nunca se aplica a estaciones estables — drifted_stations
-# ya viene filtrado (>=20% de cambio sostenido en 5 días o >=50% en 1 día), así
-# que esto no le quita margen a ninguna estación que no lo necesite.
+MAX_GBM_WEIGHT_DRIFTED = 0.5  # PROBADO Y DESCARTADO (2026-09-30) — no se usa
+# (blend_weights_3way ya no recibe drifted_stations). La hipótesis era que
+# capar w_gbm en estaciones con quiebre les dejaría más margen para
+# naive/fast/boost, pero el backtest real mostró lo contrario: en 05100
+# el GBM SÍ aportaba más que el naive/fast base aunque la estación
+# estuviera en quiebre (sin_boost bajó de 46-54 a 35-40 al aplicar el
+# tope), y el efecto se replicó en los 4 horizontes — los 4 candidatos
+# resultantes quedaron 0.9 a 1.1 puntos POR DEBAJO del champion (antes
+# +0.1 a +3.35), ninguno promovió. Queda la función con el parámetro
+# opcional por si alguien quiere retomarlo con un tope distinto, pero
+# 0.5 aplicado de forma pareja a todas las estaciones con quiebre es
+# demasiado agresivo — no repetir sin evidencia nueva.
 
 
 def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1,
@@ -522,8 +524,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             sid: ("gbm" if val_gbm_acc[sid] >= val_naive_acc[sid] else "naive")
             for sid in val_gbm_acc.index
         }
-        mix_weights_by_station = blend_weights_3way(val_df, val_naive_pred, val_fast_pred, val_gbm_pred,
-                                                      drifted_stations=drifted_stations)
+        mix_weights_by_station = blend_weights_3way(val_df, val_naive_pred, val_fast_pred, val_gbm_pred)
 
         # Paso 2 — reentrenar con train+validación y evaluar UNA sola vez
         # sobre test, ya con la selección de Paso 1 congelada.
