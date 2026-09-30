@@ -128,13 +128,25 @@ def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd
     # rolling_mean_24h por separado. Validado A/B: mejora consistente en
     # los 4 horizontes (~+0.1-0.2pt de accuracy).
     df["drift_4h_vs_24h"] = df["rolling_mean_4h"] - df["rolling_mean_24h"]
+    # `short_slope`: cambio en los últimos 15min (lag_1 - lag_2) — mismo
+    # razonamiento que momentum_vs_ayer/drift_4h_vs_24h: un árbol podría
+    # en teoría aprender esta resta combinando splits en lag_1 y lag_2 por
+    # separado, pero dársela ya calculada es más directo y no depende de
+    # que el árbol tenga la profundidad/cantidad de splits necesaria para
+    # reconstruirla. Motivada por el boost reactivo de hybrid_predict
+    # (trend_extrapolated_signal, 2026-09-30), que ya usa esta misma resta
+    # como señal POST-HOC fuera del modelo — dársela directo al GBM le
+    # permite aprender cuánto pesar la tendencia reciente según el
+    # contexto (hora, estación, magnitud), en vez de depender solo de la
+    # mezcla fija que aplica compute_fast_boost después.
+    df["short_slope"] = df["lag_1"] - df["lag_2"]
 
     df["target_demand"] = df["demand"].astype(float)
 
     cols = [
         "station_id", "observed_at", "hour", "day_of_week", "is_weekend",
         "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
-        "rolling_mean_4h", "rolling_std_4h",
+        "rolling_mean_4h", "rolling_std_4h", "short_slope",
         "momentum_vs_ayer", "drift_4h_vs_24h",
         "rain_mm", "temperature_c", "event_intensity",
         "target_demand",

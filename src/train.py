@@ -66,7 +66,7 @@ FEATURE_COLS = [
     "target_hour", "target_day_of_week",
     "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
     "rolling_mean_4h", "rolling_std_4h",
-    "momentum_vs_ayer", "drift_4h_vs_24h",
+    "momentum_vs_ayer", "drift_4h_vs_24h", "short_slope",
     "rain_mm", "temperature_c", "event_intensity",
 ]
 N_ENSEMBLE = 3  # cuántos HistGradientBoostingRegressor se promedian (bagging)
@@ -281,7 +281,20 @@ def naive_fast_baseline(df):
     return df["rolling_mean_4h"].to_numpy()
 
 
-def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1):
+MAX_GBM_WEIGHT_DRIFTED = 0.5  # tope al w_gbm que puede elegir el grid search
+# para estaciones YA detectadas con quiebre (ver detect_drifted_stations),
+# calculado ANTES de este grid search con el histórico completo — 2026-09-30,
+# diagnosticado con datos reales: sin este tope, el grid search de VALIDACIÓN
+# (que termina antes de que el quiebre grande ocurriera) elegía w_gbm=0.70-0.80
+# para estaciones como 05000/05100, dejando muy poco margen de entrada tanto
+# para el naive/fast base como para el boost reactivo que se suma después
+# (ver hybrid_predict). Nunca se aplica a estaciones estables — drifted_stations
+# ya viene filtrado (>=20% de cambio sostenido en 5 días o >=50% en 1 día), así
+# que esto no le quita margen a ninguna estación que no lo necesite.
+
+
+def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1,
+                        drifted_stations=None, max_gbm_drifted=MAX_GBM_WEIGHT_DRIFTED):
     """Por estación, busca por grid search (barato: ~66 combinaciones con
     paso 0.1) los pesos (w_gbm, w_fast) que maximizan accuracy en
     VALIDACIÓN de la mezcla w_gbm*gbm + w_fast*fast + (1-w_gbm-w_fast)*naive
@@ -293,7 +306,9 @@ def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1):
     validó explícitamente que un peso fijo de rolling_mean_4h para TODAS
     las estaciones cuesta 4-27 puntos en una estación sin quiebre, de ahí
     la necesidad de que salga de validación por estación en vez de un
-    número global)."""
+    número global). `drifted_stations` es opcional: si se pasa, capa el
+    w_gbm que el grid search puede elegir para esas estaciones (ver
+    MAX_GBM_WEIGHT_DRIFTED)."""
     grid = np.round(np.arange(0.0, 1.0 + 1e-9, grid_step), 2)
     df = pd.DataFrame({
         "station_id": val_df["station_id"].to_numpy(),
@@ -304,8 +319,9 @@ def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1):
     })
     weights_by_station = {}
     for sid, g in df.groupby("station_id"):
+        gbm_cap = max_gbm_drifted if (drifted_stations and sid in drifted_stations) else 1.0
         best_w_gbm, best_w_fast, best_acc = 0.0, 0.0, -np.inf
-        for w_gbm in grid:
+        for w_gbm in grid[grid <= gbm_cap + 1e-9]:
             for w_fast in grid[grid <= 1.0 - w_gbm + 1e-9]:
                 w_naive = 1.0 - w_gbm - w_fast
                 pred = w_naive * g["naive"] + w_fast * g["fast"] + w_gbm * g["gbm"]
@@ -506,7 +522,8 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             sid: ("gbm" if val_gbm_acc[sid] >= val_naive_acc[sid] else "naive")
             for sid in val_gbm_acc.index
         }
-        mix_weights_by_station = blend_weights_3way(val_df, val_naive_pred, val_fast_pred, val_gbm_pred)
+        mix_weights_by_station = blend_weights_3way(val_df, val_naive_pred, val_fast_pred, val_gbm_pred,
+                                                      drifted_stations=drifted_stations)
 
         # Paso 2 — reentrenar con train+validación y evaluar UNA sola vez
         # sobre test, ya con la selección de Paso 1 congelada.
@@ -558,31 +575,10 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
                           f"con_boost={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
                           f"w_gbm={w['gbm']:.2f} w_fast={w['fast']:.2f} espacio_boost={room:.2f}")
 
-            # Barrido puntual (2026-09-30, NO afecta producción todavía):
-            # +15min quedó a centésimas del umbral de promoción varias
-            # corridas seguidas — antes de tocar las constantes globales
-            # (que también rigen +30/45/60, ya promovidos y funcionando),
-            # se prueban varias combinaciones (threshold, k) EN EL MISMO
-            # backtest para ver si alguna cierra la brecha sin
-            # necesidad de adivinar.
-            if horizon_min == 15:
-                print("     --- barrido threshold/k (solo diagnóstico) ---")
-                for th, k in [(0.10, 0.5), (0.05, 0.5), (0.10, 0.8), (0.05, 0.8), (0.02, 1.0), (0.10, 0.3)]:
-                    pred_variant = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                                                   drifted_stations=drifted_stations, horizon_min=horizon_min,
-                                                   boost_threshold=th, boost_k=k)
-                    acc_variant = evaluate_by_station(test_df, pred_variant)
-                    # Solo cuentan estaciones donde ESTA variante mejora sobre sin_boost
-                    # (autovalidación por estación, igual que la versión real)
-                    variant_by_sid = acc_variant.set_index("station_id")["accuracy"]
-                    validated_variant = [sid for sid in drifted_stations
-                                          if sid in variant_by_sid.index and sid in hybrid_acc_sin_boost.index
-                                          and variant_by_sid[sid] > hybrid_acc_sin_boost[sid]]
-                    pred_final_variant = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                                                         drifted_stations=validated_variant, horizon_min=horizon_min,
-                                                         boost_threshold=th, boost_k=k)
-                    mean_acc = evaluate_by_station(test_df, pred_final_variant)["accuracy"].mean()
-                    print(f"     threshold={th} k={k}: hybrid_mean={mean_acc:.2f}  validadas={validated_variant}")
+            # Barrido de threshold/k (2026-09-30): probado, ganancia marginal
+            # (+0.05 a +0.11, insuficiente por sí sola para +15min) — no vale
+            # la pena seguir pagando el costo de cómputo en cada corrida.
+            # Detalle en el historial de commits si hace falta retomarlo.
 
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                       drifted_stations=boost_validated_stations, horizon_min=horizon_min)
