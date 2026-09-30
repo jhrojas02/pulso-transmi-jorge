@@ -36,12 +36,15 @@ jobs:
           PULSO_API_KEY: ${{ secrets.PULSO_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # DATABASE_URL (Plan B / Neon) deshabilitada temporalmente: cuota de Neon excedida.
-          # Fallback a Supabase hasta restablecer Neon. Ver docs/plan-b-postgres.md.
+          # Reactivada 2026-09-30: Supabase devuelve 402 (cuota de Cached
+          # Egress agotada hasta el 17 de octubre) — probando si Neon sigue
+          # disponible como fallback. Ver docs/plan-b-postgres.md.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.pipeline.submit_current_cycle
       - name: Evaluar predicciones ya resueltas (y disparar reentrenamiento si hay drift)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -m src.pipeline.monitor
