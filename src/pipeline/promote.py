@@ -132,11 +132,15 @@ def champion_accuracy_on(champ_bundle, train_df, test_df, drifted_stations=None,
     delta contra el candidato es una comparación real, no contra un número
     viejo.
 
-    `drifted_stations`/`horizon_min` se pasan igual que al candidato (ver
-    train_mod.hybrid_predict / compute_fast_boost) para que el boost
-    reactivo aplique parejo en ambos lados — comparar un candidato CON
-    boost contra un champion SIN boost inflaría el delta de forma
-    artificial."""
+    `drifted_stations` debe ser el `boost_validated_stations` PROPIO del
+    champion (lo que de verdad tiene persistido en su feature_list), no
+    el del candidato — si no, el champion recibe crédito en la
+    comparación por un boost que su artefacto desplegado en producción
+    nunca aplicaría, y el delta nunca alcanza el umbral de promoción
+    aunque el candidato sea el primero en tener el boost validado (bug
+    real detectado 2026-09-30: 3 corridas de train.yml seguidas
+    validaron el boost pero ninguna promovió, porque el champion viejo
+    -sin boost- se comparaba ya "boosteado" prestado del candidato)."""
     if champ_bundle is None:
         return None, {}
     naive_pred = train_mod.naive_baseline(train_df, test_df)
@@ -274,7 +278,8 @@ def main():
         champ_bundle = load_champion_bundle(horizon_min)
         champ_accuracy_mean, champ_by_station = champion_accuracy_on(
             champ_bundle, row["_full_train_df"], row["_test_df"],
-            drifted_stations=row["boost_validated_stations"], horizon_min=horizon_min,
+            drifted_stations=champ_bundle["boost_validated_stations"] if champ_bundle else None,
+            horizon_min=horizon_min,
         )
 
         promoted, reason = decide_and_promote(horizon_min, model_id, row, champ_accuracy_mean, champ_by_station)
