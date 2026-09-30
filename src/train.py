@@ -471,8 +471,33 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         gbm_by_station = evaluate_by_station(test_df, gbm_pred)
         gbm_overall_wape, gbm_overall_acc = wape_accuracy(test_df["target_demand"], gbm_pred)
 
+        # Autovalidación del boost (2026-09-30): antes de confiar en
+        # `drifted_stations` a ciegas, se mide en ESTE MISMO test si el
+        # boost de verdad mejora cada estación detectada — nunca se
+        # asume. Reemplaza el paso manual que se hizo hoy a mano para
+        # 02300 (ayuda) y 03000 (empeora, se descartó): con esto, una
+        # estación nueva con quiebre en el futuro pasa por la misma
+        # prueba automáticamente, sin necesitar intervención manual.
+        # `boost_validated_stations` (no `drifted_stations` crudo) es lo
+        # que se guarda en el champion y lo que usa la inferencia en
+        # vivo — ver register_candidate/load_champion_bundle en promote.py
+        # y predict_targets en submit_current_cycle.py.
+        hybrid_pred_sin_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station)
+        hybrid_acc_sin_boost = evaluate_by_station(test_df, hybrid_pred_sin_boost).set_index("station_id")["accuracy"]
+        hybrid_pred_con_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                                                drifted_stations=drifted_stations, horizon_min=horizon_min)
+        hybrid_acc_con_boost = evaluate_by_station(test_df, hybrid_pred_con_boost).set_index("station_id")["accuracy"]
+        boost_validated_stations = {
+            sid: drifted_stations[sid] for sid in drifted_stations
+            if sid in hybrid_acc_con_boost.index and hybrid_acc_con_boost[sid] > hybrid_acc_sin_boost[sid]
+        }
+        if drifted_stations:
+            print(f"  -> boost validado con backtest real en este mismo test: "
+                  f"{list(boost_validated_stations)} SÍ mejoran, "
+                  f"{[s for s in drifted_stations if s not in boost_validated_stations]} NO (se dejan sin boost)")
+
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                                      drifted_stations=drifted_stations, horizon_min=horizon_min)
+                                      drifted_stations=boost_validated_stations, horizon_min=horizon_min)
         hybrid_by_station = evaluate_by_station(test_df, hybrid_pred)
         hybrid_overall_wape, hybrid_overall_acc = wape_accuracy(test_df["target_demand"], hybrid_pred)
 
@@ -489,6 +514,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             "n_train": len(full_train_df),
             "n_test": len(test_df),
             "drifted_stations": drifted_stations,
+            "boost_validated_stations": list(boost_validated_stations),
             "winner_by_station": winner_by_station,
             "mix_weights_by_station": mix_weights_by_station,
             "naive_accuracy_mean_stations": naive_by_station["accuracy"].mean(),

@@ -80,6 +80,7 @@ def load_promoted_model():
     models = {}
     blend_weight_by_horizon = {}
     feature_cols_by_horizon = {}
+    boost_validated_by_horizon = {}
     versions = set()
     trained_ats = set()
     training_data_ends = set()
@@ -111,6 +112,10 @@ def load_promoted_model():
                 }
             mix_weights_by_station = {sid: {"gbm": w, "fast": 0.0} for sid, w in blend_weight_by_station.items()}
         blend_weight_by_horizon[row["horizon_min"]] = mix_weights_by_station
+        # Champion de antes de la autovalidación del boost (2026-09-30):
+        # sin este campo, ninguna estación pasa el filtro — comportamiento
+        # seguro por defecto (sin boost) hasta reentrenar con código nuevo.
+        boost_validated_by_horizon[row["horizon_min"]] = set(feature_list.get("boost_validated_stations", []))
 
         artifact_uri = modelo_row["artifact_uri"]
         assert artifact_uri.startswith("supabase-storage://models/"), f"artifact_uri inesperado: {artifact_uri}"
@@ -138,6 +143,7 @@ def load_promoted_model():
         "models": models,
         "blend_weight_by_horizon": blend_weight_by_horizon,
         "feature_cols_by_horizon": feature_cols_by_horizon,
+        "boost_validated_by_horizon": boost_validated_by_horizon,
         "version": model_version,
         "trained_at": trained_at,
         "training_data_end": training_data_end,
@@ -223,8 +229,12 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
     congelados por estación (ver train.hybrid_predict) en vez de elegir uno
     solo — mismo criterio que usó el entrenamiento para esta versión de
     champion. `drifted_stations` (recalculado en cada ciclo, ver
-    build_features_as_of) suma el boost reactivo de
-    train_mod.compute_fast_boost, igual que en train.py/promote.py."""
+    build_features_as_of) es candidata a boost reactivo
+    (train_mod.compute_fast_boost) SOLO si además está en
+    `model["boost_validated_by_horizon"]` para ese horizonte — el champion
+    ya la validó con backtest real al entrenar (ver train.run()); una
+    estación recién detectada que el champion vigente nunca vio no se
+    boostea a ciegas, espera al próximo reentrenamiento que la valide."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     predictions = []
@@ -251,7 +261,8 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
         # nunca a fast_value (rolling_mean_4h) — mismo diseño que
         # train.hybrid_predict, ver ese docstring para el porqué.
         w_boost = 0.0
-        if drifted_stations and sid in drifted_stations:
+        boost_validated = model.get("boost_validated_by_horizon", {}).get(horizon_min, set())
+        if drifted_stations and sid in drifted_stations and sid in boost_validated:
             w_boost = train_mod.compute_fast_boost([naive_value], [boost_value], [True], horizon_min)[0]
             w_boost = min(w_boost, max(0.0, 1.0 - w_gbm - w_fast))
         feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)

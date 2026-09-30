@@ -111,11 +111,17 @@ def load_champion_bundle(horizon_min):
                 for sid, winner in feature_list.get("winner_by_station", {}).items()
             }
         mix_weights_by_station = {sid: {"gbm": w, "fast": 0.0} for sid, w in blend_weight_by_station.items()}
+    # Champion de antes de la autovalidación del boost (2026-09-30): sin
+    # este campo, tratar como que NINGUNA estación pasó la prueba —
+    # comportamiento seguro por defecto (sin boost) hasta que se
+    # reentrene con el código nuevo, nunca "boostear todo a ciegas".
+    boost_validated_stations = feature_list.get("boost_validated_stations", [])
     return {
         "model": bundle["model"],
         "station_categories": bundle["station_categories"],
         "feature_cols": feature_list["features"],
         "mix_weights_by_station": mix_weights_by_station,
+        "boost_validated_stations": boost_validated_stations,
     }
 
 
@@ -153,6 +159,7 @@ def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_in
         "features": train_mod.FEATURE_COLS,
         "winner_by_station": summary_row["winner_by_station"],
         "mix_weights_by_station": summary_row["mix_weights_by_station"],
+        "boost_validated_stations": summary_row["boost_validated_stations"],
         "gbm_loss": "poisson",
         "early_stopping": True,
     }
@@ -267,7 +274,7 @@ def main():
         champ_bundle = load_champion_bundle(horizon_min)
         champ_accuracy_mean, champ_by_station = champion_accuracy_on(
             champ_bundle, row["_full_train_df"], row["_test_df"],
-            drifted_stations=row["drifted_stations"], horizon_min=horizon_min,
+            drifted_stations=row["boost_validated_stations"], horizon_min=horizon_min,
         )
 
         promoted, reason = decide_and_promote(horizon_min, model_id, row, champ_accuracy_mean, champ_by_station)
