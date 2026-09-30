@@ -15,17 +15,42 @@ print(r.status_code, r.text[:2000])
 
 import json as jsonlib
 
-print("\n=== raw leaderboard row (cumulative, primeras 3) ===")
-r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": "cumulative"}, headers=headers, timeout=15)
-raw = r.json()
-print("keys del payload:", list(raw.keys()))
-for row in raw["data"][:3]:
-    print(jsonlib.dumps(row, indent=2))
+import time
 
+print("\n=== metadata de cada ventana del leaderboard ===")
 boards = {}
+raw_by_window = {}
 for window in ["cumulative", "rolling_24h"]:
-    r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": window}, headers=headers, timeout=15)
-    boards[window] = {row["display_name"]: row["accuracy"] for row in r.json()["data"]}
+    for attempt in range(5):
+        r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": window}, headers=headers, timeout=15)
+        if r.status_code == 200:
+            break
+        print(f"  reintento {attempt} para {window}: {r.status_code}")
+        time.sleep(3)
+    raw = r.json()
+    raw_by_window[window] = raw
+    meta = {k: v for k, v in raw.items() if k != "data"}
+    print(f"{window}: {jsonlib.dumps(meta, indent=2)}")
+    boards[window] = {row["display_name"]: row["accuracy"] for row in raw["data"]}
+    time.sleep(2)
+
+print("\n=== nuestra fila completa en cada ventana ===")
+for window, raw in raw_by_window.items():
+    for row in raw["data"]:
+        if row["display_name"] == "Jorge Horacio Rojas Criollo":
+            print(f"{window}: {jsonlib.dumps(row, indent=2)}")
+
+print("\n=== fila completa de los top 3 y de quien más subió, ambas ventanas ===")
+cum_by_name = {r["display_name"]: r for r in raw_by_window["cumulative"]["data"]}
+roll_by_name = {r["display_name"]: r for r in raw_by_window["rolling_24h"]["data"]}
+gaps = sorted(
+    ((name, roll_by_name[name]["accuracy"] - cum_by_name[name]["accuracy"]) for name in cum_by_name if name in roll_by_name),
+    key=lambda x: -x[1],
+)
+for name, gap in gaps[:5]:
+    print(f"-- {name} (gap={gap:+.2f}) --")
+    print("cumulative:", jsonlib.dumps(cum_by_name[name], indent=2))
+    print("rolling_24h:", jsonlib.dumps(roll_by_name[name], indent=2))
 
 print("\n=== comparacion cumulative vs rolling_24h (gap = rolling - cumulative) ===")
 names = set(boards["cumulative"]) | set(boards["rolling_24h"])
