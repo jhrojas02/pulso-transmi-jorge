@@ -316,6 +316,29 @@ def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1):
     return weights_by_station
 
 
+def trend_extrapolated_signal(lag_1, lag_2, horizon_steps):
+    """Señal alternativa a lag_1 puro para el boost reactivo: extrapola la
+    pendiente de muy corto plazo (`lag_1 - lag_2`, el cambio en los
+    últimos 15min) `horizon_steps` pasos hacia adelante, en vez de asumir
+    que el nivel se queda congelado en lag_1 (2026-09-30, investigando por
+    qué 05100 seguía con accuracy muy negativa incluso con el boost ya
+    aplicado: su demanda sigue cayendo CICLO A CICLO, no dio un solo salto
+    y ya — lag_1 corrige el nivel absoluto, pero en +45/+60min ya vuelve a
+    llegar tarde porque asume que el valor de hace 15min sigue vigente 3-4
+    pasos después. 03000 tiene el mismo problema en los horizontes donde
+    el boost actual está desactivado (ver boost_validated_stations).
+
+    Debe pasar por la MISMA autovalidación por estación/horizonte que
+    cualquier otra señal de boost (ver run(): compara con backtest real
+    contra la versión sin boost) — nunca se asume que extrapolar la
+    pendiente ayuda; en una estación cuyo quiebre ya se está frenando,
+    podría sobrecorregir."""
+    lag_1 = np.asarray(lag_1, dtype=float)
+    lag_2 = np.asarray(lag_2, dtype=float)
+    slope = lag_1 - lag_2
+    return np.clip(lag_1 + slope * horizon_steps, 0, None)
+
+
 FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
 # señal del boost (ver más abajo) deja de haber horizontes "malos" — a
 # diferencia del intento anterior (2026-09-29) con rolling_mean_4h, que
@@ -367,14 +390,21 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     `drifted_stations`/`horizon_min` son opcionales: si se pasan, se suma
     el boost reactivo de compute_fast_boost por encima del peso base —
     ver esa función para el porqué y las salvaguardas. `boost_fast_pred`
-    (por defecto, `test_df["lag_1"]` si existe esa columna, si no cae a
-    `fast_pred`) es la señal que usa SOLO el boost — separada de
-    `fast_pred` (rolling_mean_4h, sigue igual que siempre en la mezcla
-    base) para no tocar el comportamiento ya validado de las estaciones
-    estables, que nunca pasan por el boost."""
+    (por defecto, la extrapolación de tendencia de
+    `trend_extrapolated_signal(lag_1, lag_2, horizon_steps)` si hay
+    horizon_min y ambos lags disponibles; si no, cae a lag_1 puro, y si
+    tampoco hay lag_1 cae a `fast_pred`) es la señal que usa SOLO el
+    boost — separada de `fast_pred` (rolling_mean_4h, sigue igual que
+    siempre en la mezcla base) para no tocar el comportamiento ya
+    validado de las estaciones estables, que nunca pasan por el boost."""
     naive_pred, fast_pred, gbm_pred = np.asarray(naive_pred), np.asarray(fast_pred), np.asarray(gbm_pred)
     if boost_fast_pred is None:
-        boost_fast_pred = test_df["lag_1"].to_numpy() if "lag_1" in test_df.columns else fast_pred
+        if "lag_1" in test_df.columns and "lag_2" in test_df.columns and horizon_min is not None:
+            boost_fast_pred = trend_extrapolated_signal(test_df["lag_1"], test_df["lag_2"], horizon_min // 15)
+        elif "lag_1" in test_df.columns:
+            boost_fast_pred = test_df["lag_1"].to_numpy()
+        else:
+            boost_fast_pred = fast_pred
     else:
         boost_fast_pred = np.asarray(boost_fast_pred, dtype=float)
     if mix_weights_by_station:
@@ -495,6 +525,16 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             print(f"  -> boost validado con backtest real en este mismo test: "
                   f"{list(boost_validated_stations)} SÍ mejoran, "
                   f"{[s for s in drifted_stations if s not in boost_validated_stations]} NO (se dejan sin boost)")
+            # Diagnóstico puntual (2026-09-30, evaluando trend_extrapolated_signal
+            # vs. lag_1 puro): accuracy sin boost vs con boost por estación con
+            # quiebre, para verificar en los logs de train.yml si la extrapolación
+            # de tendencia mejora las que seguían mal (05100, 03000) sin romper
+            # las que el boost anterior ya arreglaba (02300, 05000, 07111).
+            for sid in drifted_stations:
+                if sid in hybrid_acc_sin_boost.index and sid in hybrid_acc_con_boost.index:
+                    print(f"     {sid}: sin_boost={hybrid_acc_sin_boost[sid]:.2f}  "
+                          f"con_boost(trend)={hybrid_acc_con_boost[sid]:.2f}  "
+                          f"delta={hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f}")
 
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                       drifted_stations=boost_validated_stations, horizon_min=horizon_min)
