@@ -242,12 +242,18 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
         naive_value = float(lookup.get(key, station_mean.get(sid, 0.0)))
         fast_raw = combined.get("rolling_mean_4h")
         fast_value = float(fast_raw) if pd.notna(fast_raw) else naive_value
+        boost_raw = combined.get("lag_1")
+        boost_value = float(boost_raw) if pd.notna(boost_raw) else naive_value
 
         mix = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, {"gbm": 0.0, "fast": 0.0})
         w_gbm, w_fast = mix["gbm"], mix["fast"]
+        # w_boost es aparte de w_fast: multiplica a boost_value (lag_1),
+        # nunca a fast_value (rolling_mean_4h) — mismo diseño que
+        # train.hybrid_predict, ver ese docstring para el porqué.
+        w_boost = 0.0
         if drifted_stations and sid in drifted_stations:
-            boost = train_mod.compute_fast_boost([naive_value], [fast_value], [True], horizon_min)[0]
-            w_fast = min(w_fast + boost, 1.0 - w_gbm)
+            w_boost = train_mod.compute_fast_boost([naive_value], [boost_value], [True], horizon_min)[0]
+            w_boost = min(w_boost, max(0.0, 1.0 - w_gbm - w_fast))
         feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)
         has_nan_features = any(pd.isna(combined.get(c)) for c in feature_cols)
         if w_gbm > 0 and horizon_min in model["models"] and not has_nan_features:
@@ -257,8 +263,8 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
             gbm_value = float(bundle["model"].predict(X)[0])
         else:
             gbm_value, w_gbm = 0.0, 0.0
-        w_naive = 1.0 - w_gbm - w_fast
-        value = w_naive * naive_value + w_fast * fast_value + w_gbm * gbm_value
+        w_naive = 1.0 - w_gbm - w_fast - w_boost
+        value = w_naive * naive_value + w_fast * fast_value + w_boost * boost_value + w_gbm * gbm_value
 
         value = max(0.0, value)
         predictions.append({

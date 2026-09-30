@@ -115,31 +115,52 @@ DRIFT_THRESHOLD_PCT = 20.0  # cambio de nivel medio >=20% = quiebre real, no
 # 05100 -45.7%, 07111 +29.9%, 05000 +38.9% vs. el resto de estaciones
 # estables en ±1-17%, la mayoría bajo 13%)
 
+DRIFT_FAST_RECENT_DAYS = 1  # segunda mirada, más corta, para quiebres que
+# empiezan literalmente el último día — la comparación de 5 días (arriba)
+# los diluye y no los detecta hasta que llevan varios días (encontrado el
+# 2026-09-29 con 02300 +253.4% y 03000 -53.4% en 1 día, invisibles en la
+# ventana de 5 días).
+DRIFT_FAST_THRESHOLD_PCT = 50.0  # más alto que el de 5 días a propósito:
+# con solo 1 día de muestra el ruido normal ya es más grande (validado:
+# una estación estable mostró -22.5% en 1 día sin ser un quiebre real) —
+# 50% deja fuera ese ruido pero sigue capturando saltos reales grandes.
+
 
 def detect_drifted_stations(observations, as_of, recent_days=DRIFT_RECENT_DAYS,
                              lookback_days=DRIFT_LOOKBACK_DAYS, threshold_pct=DRIFT_THRESHOLD_PCT):
     """Detección automática, por estación, de un quiebre reciente de nivel
-    de demanda: compara el promedio de los últimos `recent_days` contra el
-    de los `lookback_days - recent_days` anteriores a eso. Reemplaza tener
-    que detectar esto a mano estación por estación (así se encontró el
-    quiebre de 05100, y luego 07111/05000, el 2026-09-29) — se recalcula en
-    cada corrida de train.yml para que una estación nueva con quiebre se
-    trate igual sin tener que hardcodear su station_id."""
+    de demanda. Combina DOS ventanas: la de `recent_days` (por defecto 5,
+    ve quiebres sostenidos varios días) y una segunda más corta
+    (DRIFT_FAST_RECENT_DAYS=1, con su propio umbral más alto,
+    DRIFT_FAST_THRESHOLD_PCT) que ve un salto brusco de un solo día que la
+    ventana de 5 días todavía diluye. Reemplaza tener que detectar esto a
+    mano estación por estación (así se encontraron 05100/07111/05000 el
+    2026-09-29, y 02300/03000 el 2026-09-30) — se recalcula en cada
+    corrida para que una estación nueva con quiebre se trate igual sin
+    tener que hardcodear su station_id. Una estación cuenta como drifted
+    si CUALQUIERA de las dos ventanas la marca."""
     obs = observations.copy()
     obs["observed_at"] = pd.to_datetime(obs["observed_at"], utc=True)
     as_of = pd.Timestamp(as_of)
-    recent_cut = as_of - pd.Timedelta(days=recent_days)
-    lookback_cut = as_of - pd.Timedelta(days=lookback_days)
 
-    recent = obs[obs["observed_at"] > recent_cut]
-    older = obs[(obs["observed_at"] <= recent_cut) & (obs["observed_at"] > lookback_cut)]
-    recent_mean = recent.groupby("station_id")["demand"].mean()
-    older_mean = older.groupby("station_id")["demand"].mean()
+    def _pct_change(win_recent_days):
+        recent_cut = as_of - pd.Timedelta(days=win_recent_days)
+        lookback_cut = as_of - pd.Timedelta(days=lookback_days)
+        recent = obs[obs["observed_at"] > recent_cut]
+        older = obs[(obs["observed_at"] <= recent_cut) & (obs["observed_at"] > lookback_cut)]
+        recent_mean = recent.groupby("station_id")["demand"].mean()
+        older_mean = older.groupby("station_id")["demand"].mean()
+        common = recent_mean.index.intersection(older_mean.index)
+        return 100 * (recent_mean[common] - older_mean[common]) / older_mean[common]
 
-    common = recent_mean.index.intersection(older_mean.index)
-    pct_change = 100 * (recent_mean[common] - older_mean[common]) / older_mean[common]
-    drifted = pct_change[pct_change.abs() >= threshold_pct]
-    return drifted.round(1).to_dict()
+    pct_slow = _pct_change(recent_days)
+    pct_fast = _pct_change(DRIFT_FAST_RECENT_DAYS)
+
+    drifted_slow = pct_slow[pct_slow.abs() >= threshold_pct]
+    drifted_fast = pct_fast[pct_fast.abs() >= DRIFT_FAST_THRESHOLD_PCT]
+
+    combined = drifted_slow.combine_first(drifted_fast)
+    return combined.round(1).to_dict()
 
 
 NAIVE_HALFLIFE_DAYS = 14  # a una observación de hace 14 días le pesa la mitad
@@ -295,57 +316,67 @@ def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1):
     return weights_by_station
 
 
-FAST_BOOST_HORIZONS = {15}  # único horizonte donde el boost mejoró LIMPIO en
-# las 3 estaciones con quiebre (backtest real 2026-09-29, 07111/05000/05100
-# vs. control 02300/03000). A +30min ya es mixto (05100 mejora pero
-# 05000/07111 empeoran) y a +45/+60min empeora derecho: la señal de 4h no
-# predice bien tan lejos mientras el quiebre sigue en movimiento (ej. 05000
-# casi se cuadruplicó en un solo día) — se deja el comportamiento normal en
-# esos 3 horizontes.
-FAST_BOOST_THRESHOLD = 0.10  # desviación mínima (10%) de fast vs. naive para
-# activar el boost — validado en el mismo backtest, poco sensible entre 0 y
-# 0.15.
+FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
+# señal del boost (ver más abajo) deja de haber horizontes "malos" — a
+# diferencia del intento anterior (2026-09-29) con rolling_mean_4h, que
+# solo funcionaba limpio en +15min. Backtest real 2026-09-30
+# (05100/05000/07111 vs. control 02300/03000): ganancia positiva en los
+# 4 horizontes para las 3 estaciones con quiebre sostenido (+4.3 a
+# +10.3 puntos).
+FAST_BOOST_THRESHOLD = 0.10  # desviación mínima (10%) de boost_fast vs.
+# naive para activar el boost.
 FAST_BOOST_K = 0.5  # cuánto w_fast se suma por cada punto de desviación por
-# encima del umbral (capado a 1.0). Con k=0.5 la ganancia neta en las 3
-# estaciones con quiebre fue la mejor combinada en el barrido de horizonte
-# 15/30min; k=1.0 gana un poco más en 05100 pero un poco menos en las otras
-# dos, casi empatado — se deja 0.5 como punto medio razonable.
+# encima del umbral (capado a 1.0).
 
 
-def compute_fast_boost(naive_pred, fast_pred, is_drifted, horizon_min):
+def compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min):
     """Boost adicional a w_fast, SOLO para filas de estaciones con quiebre
-    de demanda ya confirmado (`is_drifted`, ver detect_drifted_stations —
-    exige un cambio sostenido de nivel medio en >=5 días, nunca un pico
-    puntual) y SOLO en +15/+30min (ver FAST_BOOST_HORIZONS). Reemplaza el
-    boost dinámico descartado el 2026-09-28 (comparaba contra
+    de demanda ya confirmado (`is_drifted`, ver detect_drifted_stations).
+    Reemplaza el boost dinámico descartado el 2026-09-28 (comparaba contra
     rolling_mean_24h y confundía cualquier hora pico con una emergencia,
     -27 puntos en 03000 estable) — este compara contra naive_pred, que ya
     es el nivel esperado PARA ESA hora/día (no un promedio plano), y además
     solo se activa en estaciones ya confirmadas con quiebre, así que nunca
-    dispara por el ruido normal de una estación estable. Validado en
-    backtest real: con el gate por estación, las estables quedan en 0.0 de
-    cambio SIEMPRE (ver notas 2026-09-29)."""
+    dispara por el ruido normal de una estación estable.
+
+    `boost_fast_pred` es la ÚLTIMA observación real (lag_1), no
+    rolling_mean_4h — cambiado el 2026-09-30: un promedio de 4h reacciona
+    demasiado lento cuando la demanda sigue moviéndose (sube/baja de un
+    ciclo al otro), sobre todo en +30/+45/+60min; lag_1 seguía siendo la
+    lectura MÁS reciente posible, sin promediar, así que reacciona de
+    inmediato — validado en backtest real: mejora en los 4 horizontes
+    para las 3 estaciones con quiebre sostenido conocidas, y de paso
+    arregla dos casos nuevos (un pico de un día y una caída pronunciada)
+    donde rolling_mean_4h como señal del boost empeoraba."""
     if horizon_min not in FAST_BOOST_HORIZONS:
         return np.zeros(len(np.asarray(naive_pred)))
     naive_pred = np.asarray(naive_pred, dtype=float)
-    fast_pred = np.asarray(fast_pred, dtype=float)
+    boost_fast_pred = np.asarray(boost_fast_pred, dtype=float)
     naive_safe = np.where(naive_pred == 0, np.nan, naive_pred)
-    dev = np.nan_to_num((fast_pred - naive_pred) / naive_safe, nan=0.0)
+    dev = np.nan_to_num((boost_fast_pred - naive_pred) / naive_safe, nan=0.0)
     boost = np.clip(np.abs(dev) - FAST_BOOST_THRESHOLD, 0, None) * FAST_BOOST_K
     return np.where(np.asarray(is_drifted), np.clip(boost, 0, 1.0), 0.0)
 
 
 def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                    drifted_stations=None, horizon_min=None):
+                    drifted_stations=None, horizon_min=None, boost_fast_pred=None):
     """Mezcla los 3 candidatos por estación según mix_weights_by_station
     ({"gbm": w_gbm, "fast": w_fast}, peso naive implícito = 1-w_gbm-w_fast)
     — ver blend_weights_3way.
 
     `drifted_stations`/`horizon_min` son opcionales: si se pasan, se suma
     el boost reactivo de compute_fast_boost por encima del peso base —
-    ver esa función para el porqué y las salvaguardas. Sin ellos (default),
-    el comportamiento es idéntico al de antes de 2026-09-29."""
+    ver esa función para el porqué y las salvaguardas. `boost_fast_pred`
+    (por defecto, `test_df["lag_1"]` si existe esa columna, si no cae a
+    `fast_pred`) es la señal que usa SOLO el boost — separada de
+    `fast_pred` (rolling_mean_4h, sigue igual que siempre en la mezcla
+    base) para no tocar el comportamiento ya validado de las estaciones
+    estables, que nunca pasan por el boost."""
     naive_pred, fast_pred, gbm_pred = np.asarray(naive_pred), np.asarray(fast_pred), np.asarray(gbm_pred)
+    if boost_fast_pred is None:
+        boost_fast_pred = test_df["lag_1"].to_numpy() if "lag_1" in test_df.columns else fast_pred
+    else:
+        boost_fast_pred = np.asarray(boost_fast_pred, dtype=float)
     if mix_weights_by_station:
         n = len(mix_weights_by_station)
         default = {
@@ -357,12 +388,17 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     sids = test_df["station_id"]
     w_gbm = sids.map(lambda s: mix_weights_by_station.get(s, default)["gbm"]).to_numpy()
     w_fast = sids.map(lambda s: mix_weights_by_station.get(s, default)["fast"]).to_numpy()
+    # w_boost es un peso APARTE del w_fast base: multiplica a boost_fast_pred
+    # (lag_1), nunca a fast_pred (rolling_mean_4h) — así el boost no cambia
+    # el peso de rolling_mean_4h que ya eligió blend_weights_3way, solo
+    # agrega una porción nueva de lag_1 encima.
+    w_boost = np.zeros(len(sids))
     if drifted_stations and horizon_min is not None:
         is_drifted = sids.isin(drifted_stations).to_numpy()
-        boost = compute_fast_boost(naive_pred, fast_pred, is_drifted, horizon_min)
-        w_fast = np.clip(w_fast + boost, 0, 1.0 - w_gbm)
-    w_naive = 1.0 - w_gbm - w_fast
-    return w_naive * naive_pred + w_fast * fast_pred + w_gbm * gbm_pred
+        w_boost = compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min)
+        w_boost = np.clip(w_boost, 0, np.clip(1.0 - w_gbm - w_fast, 0, None))
+    w_naive = 1.0 - w_gbm - w_fast - w_boost
+    return w_naive * naive_pred + w_fast * fast_pred + w_boost * boost_fast_pred + w_gbm * gbm_pred
 
 
 def run(observations: pd.DataFrame, context: pd.DataFrame):
