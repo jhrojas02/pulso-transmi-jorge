@@ -32,6 +32,7 @@ import pandas as pd
 import requests
 
 from src import supabase_client as sb
+from src import train as train_mod
 from src.features import build_feature_frame, climatological_context, estimate_context_row, target_time_features
 from src.pipeline.sync import sync_observations_from_saved_cursor
 from src.train import FEATURE_COLS, weighted_naive_tables
@@ -79,6 +80,7 @@ def load_promoted_model():
     models = {}
     blend_weight_by_horizon = {}
     feature_cols_by_horizon = {}
+    boost_validated_by_horizon = {}
     versions = set()
     trained_ats = set()
     training_data_ends = set()
@@ -110,6 +112,10 @@ def load_promoted_model():
                 }
             mix_weights_by_station = {sid: {"gbm": w, "fast": 0.0} for sid, w in blend_weight_by_station.items()}
         blend_weight_by_horizon[row["horizon_min"]] = mix_weights_by_station
+        # Champion de antes de la autovalidación del boost (2026-09-30):
+        # sin este campo, ninguna estación pasa el filtro — comportamiento
+        # seguro por defecto (sin boost) hasta reentrenar con código nuevo.
+        boost_validated_by_horizon[row["horizon_min"]] = set(feature_list.get("boost_validated_stations", []))
 
         artifact_uri = modelo_row["artifact_uri"]
         assert artifact_uri.startswith("supabase-storage://models/"), f"artifact_uri inesperado: {artifact_uri}"
@@ -137,6 +143,7 @@ def load_promoted_model():
         "models": models,
         "blend_weight_by_horizon": blend_weight_by_horizon,
         "feature_cols_by_horizon": feature_cols_by_horizon,
+        "boost_validated_by_horizon": boost_validated_by_horizon,
         "version": model_version,
         "trained_at": trained_at,
         "training_data_end": training_data_end,
@@ -202,11 +209,17 @@ def build_features_as_of(data_cutoff, targets):
     ctx_df = pd.DataFrame(context)
     base = build_feature_frame(obs_df, ctx_df)
 
+    # Se recalcula en cada ciclo (cada 10 min) con las observaciones recién
+    # sincronizadas, no solo en cada reentrenamiento — así el boost
+    # reactivo de predict_targets() reacciona tan rápido como llegan datos
+    # nuevos, sin esperar al próximo train.yml (ver train.compute_fast_boost).
+    drifted_stations = train_mod.detect_drifted_stations(obs_df, cutoff_ts)
+
     cutoff_rows = base[base["observed_at"] == cutoff_ts]
-    return {row["station_id"]: row for _, row in cutoff_rows.iterrows()}, base
+    return {row["station_id"]: row for _, row in cutoff_rows.iterrows()}, base, drifted_stations
 
 
-def predict_targets(model, cutoff_row_by_station, targets):
+def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None):
     """Por cada target combina la fila de features del cutoff (lags,
     rolling, clima — lo que se sabe HOY) con target_hour/target_day_of_week
     calculados directo de `target_at` (lo único que describe el momento
@@ -215,7 +228,13 @@ def predict_targets(model, cutoff_row_by_station, targets):
     Mezcla naive, fast (persistencia rolling_mean_4h) y GBM con los pesos
     congelados por estación (ver train.hybrid_predict) en vez de elegir uno
     solo — mismo criterio que usó el entrenamiento para esta versión de
-    champion."""
+    champion. `drifted_stations` (recalculado en cada ciclo, ver
+    build_features_as_of) es candidata a boost reactivo
+    (train_mod.compute_fast_boost) SOLO si además está en
+    `model["boost_validated_by_horizon"]` para ese horizonte — el champion
+    ya la validó con backtest real al entrenar (ver train.run()); una
+    estación recién detectada que el champion vigente nunca vio no se
+    boostea a ciegas, espera al próximo reentrenamiento que la valide."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     predictions = []
@@ -233,9 +252,19 @@ def predict_targets(model, cutoff_row_by_station, targets):
         naive_value = float(lookup.get(key, station_mean.get(sid, 0.0)))
         fast_raw = combined.get("rolling_mean_4h")
         fast_value = float(fast_raw) if pd.notna(fast_raw) else naive_value
+        boost_raw = combined.get("lag_1")
+        boost_value = float(boost_raw) if pd.notna(boost_raw) else naive_value
 
         mix = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, {"gbm": 0.0, "fast": 0.0})
         w_gbm, w_fast = mix["gbm"], mix["fast"]
+        # w_boost es aparte de w_fast: multiplica a boost_value (lag_1),
+        # nunca a fast_value (rolling_mean_4h) — mismo diseño que
+        # train.hybrid_predict, ver ese docstring para el porqué.
+        w_boost = 0.0
+        boost_validated = model.get("boost_validated_by_horizon", {}).get(horizon_min, set())
+        if drifted_stations and sid in drifted_stations and sid in boost_validated:
+            w_boost = train_mod.compute_fast_boost([naive_value], [boost_value], [True], horizon_min)[0]
+            w_boost = min(w_boost, max(0.0, 1.0 - w_gbm - w_fast))
         feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)
         has_nan_features = any(pd.isna(combined.get(c)) for c in feature_cols)
         if w_gbm > 0 and horizon_min in model["models"] and not has_nan_features:
@@ -245,8 +274,8 @@ def predict_targets(model, cutoff_row_by_station, targets):
             gbm_value = float(bundle["model"].predict(X)[0])
         else:
             gbm_value, w_gbm = 0.0, 0.0
-        w_naive = 1.0 - w_gbm - w_fast
-        value = w_naive * naive_value + w_fast * fast_value + w_gbm * gbm_value
+        w_naive = 1.0 - w_gbm - w_fast - w_boost
+        value = w_naive * naive_value + w_fast * fast_value + w_boost * boost_value + w_gbm * gbm_value
 
         value = max(0.0, value)
         predictions.append({
@@ -378,8 +407,10 @@ def main():
         print(f"Ya existe recibo para {cycle['cycle_id']} + {model['version']}. Fin correcto (sin reenviar).")
         return
 
-    cutoff_row_by_station, base = build_features_as_of(cycle["data_cutoff"], cycle["targets"])
+    cutoff_row_by_station, base, drifted_stations = build_features_as_of(cycle["data_cutoff"], cycle["targets"])
     print(f"Estaciones con feature_row en data_cutoff: {len(cutoff_row_by_station)}/12")
+    if drifted_stations:
+        print(f"Quiebre de demanda detectado (auto): {drifted_stations}")
 
     # Misma función que usa train.py (weighted_naive_tables) para que el
     # naive en vivo pondere por recencia igual que el que se evaluó y
@@ -388,7 +419,7 @@ def main():
     # producción una vez (ver feature_cols_by_horizon más arriba).
     model["_naive_lookup"], model["_naive_station_mean"] = weighted_naive_tables(base, "hour", "day_of_week")
 
-    predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"])
+    predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"], drifted_stations=drifted_stations)
 
     try:
         validate_exact_targets(predictions, cycle["targets"])

@@ -24,6 +24,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}  # Plan B (docs/plan-b-postgres.md): si está seteada, supabase_client.py redirige todo a Postgres (Neon) en vez de Supabase
+          # DATABASE_URL (Plan B / Neon) deshabilitada temporalmente: cuota de Neon excedida.
+          # Fallback a Supabase hasta restablecer Neon. Ver docs/plan-b-postgres.md.
           GITHUB_SHA: ${{ github.sha }}
         run: python -m src.pipeline.promote

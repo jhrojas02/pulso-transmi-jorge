@@ -1,24 +1,36 @@
-"""Diagnóstico puntual de solo lectura contra Neon (DATABASE_URL) — se
-corre desde .github/workflows/diag.yml. No escribe nada."""
+"""Diagnóstico puntual de solo lectura contra la API oficial — se corre
+desde .github/workflows/diag.yml. No escribe nada."""
 
-from src import pg_client as pg
+import os
 
-print("=== metrica_validacion del champion vigente para 03000 (control estable) ===")
-champions = pg.select_all("champion", order="horizon_min.asc")
-for champ in champions:
-    m = pg.select_one(
-        "metrica_validacion",
-        filters={"model_id": f"eq.{champ['model_id']}", "station_id": "eq.03000"},
-    )
-    print(f"horizon={champ['horizon_min']} model_id={champ['model_id']}: {m}")
+import requests
 
-print("\n=== historial reciente de ejecucion_pipeline (decisiones de promote.py) ===")
-runs = pg.select_all(
-    "ejecucion_pipeline",
-    select="run_id,run_at,motivo_decision",
-    order="run_at.desc",
-)
-runs = [r for r in runs if r["motivo_decision"] and "promoted" in r["motivo_decision"]][:6]
-for r in runs:
-    print(f"\n--- {r['run_at']} ---")
-    print(r["motivo_decision"][:1500])
+API_BASE = "https://pulso-transmi.72-60-245-2.sslip.io"
+API_KEY = os.environ.get("PULSO_API_KEY", "")
+headers = {"Authorization": f"Bearer {API_KEY}"}
+
+print("=== /v1/me ===")
+r = requests.get(f"{API_BASE}/v1/me", headers=headers, timeout=15)
+print(r.status_code, r.text[:2000])
+
+import json as jsonlib
+
+boards = {}
+for window in ["cumulative", "rolling_24h"]:
+    r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": window}, headers=headers, timeout=15)
+    boards[window] = {row["display_name"]: row["accuracy"] for row in r.json()["data"]}
+
+print("\n=== comparacion cumulative vs rolling_24h (gap = rolling - cumulative) ===")
+names = set(boards["cumulative"]) | set(boards["rolling_24h"])
+rows = []
+for name in names:
+    cum = boards["cumulative"].get(name)
+    roll = boards["rolling_24h"].get(name)
+    gap = (roll - cum) if (cum is not None and roll is not None) else None
+    rows.append((name, cum, roll, gap))
+rows.sort(key=lambda r: (r[3] is None, -(r[3] or 0)))
+for name, cum, roll, gap in rows:
+    cum_s = f"{cum:6.2f}" if cum is not None else "  n/a "
+    roll_s = f"{roll:6.2f}" if roll is not None else "  n/a "
+    gap_s = f"{gap:+6.2f}" if gap is not None else "   n/a"
+    print(f"{name:35s} cumulative={cum_s}  rolling_24h={roll_s}  gap={gap_s}")

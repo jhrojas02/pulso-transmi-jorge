@@ -38,7 +38,20 @@ import pandas as pd
 from src import supabase_client as sb
 from src import train as train_mod
 
-MIN_IMPROVEMENT = 0.5  # puntos de accuracy promedio mínimos para justificar promover
+MIN_IMPROVEMENT_BY_HORIZON = {15: 0.5, 30: 0.5, 45: 0.2, 60: 0.2}
+# Puntos de accuracy promedio mínimos para justificar promover, por
+# horizonte — antes era un único 0.5 para los 4. Bajado a 0.2 SOLO en
+# +45/+60min (2026-09-29), con evidencia histórica real, no intuición:
+# revisando ~13 corridas de train.yml (27-29 sept, ejecucion_pipeline),
+# +45/+60min rechazaban una y otra vez candidatos con delta promedio
+# positivo (+0.09 a +0.31) y peor caída por estación MINÚSCULA (hasta
+# -0.06, muy por debajo de MAX_STATION_REGRESSION) — candidatos seguros,
+# bloqueados solo porque 0.5 era más estricto de lo necesario ahí. En
+# +15/+30min, en la misma ventana, el delta fue consistentemente NEGATIVO
+# (-0.26 a -0.47) — bajar el umbral ahí no habría cambiado nada bueno, así
+# que se dejan en 0.5 para no asumir un riesgo sin evidencia que lo respalde.
+
+MAX_STATION_REGRESSION = 4.0
 # Subido de 2.0 a 4.0 (2026-09-28): con 12 estaciones, el ruido normal de
 # volver a entrenar (random_state distinto, unos días más de datos) ya
 # produce una caída de 3-4 puntos en la estación más volátil AUNQUE el
@@ -49,7 +62,6 @@ MIN_IMPROVEMENT = 0.5  # puntos de accuracy promedio mínimos para justificar pr
 # desde que el champion actual quedó congelado (cutoff_train_fin ~04-06 de
 # septiembre), aunque el mundo real ya había cambiado bastante para
 # entonces (ver CHAMPION_FLOOR_ACCURACY_STATION más abajo).
-MAX_STATION_REGRESSION = 4.0
 # Si el champion YA está prediciendo mal en una estación (evaluado en vivo,
 # no su métrica vieja), no cuenta como "regresión bloqueante" que el
 # candidato también le vaya mal ahí — lo urgente es que el resto del
@@ -99,20 +111,32 @@ def load_champion_bundle(horizon_min):
                 for sid, winner in feature_list.get("winner_by_station", {}).items()
             }
         mix_weights_by_station = {sid: {"gbm": w, "fast": 0.0} for sid, w in blend_weight_by_station.items()}
+    # Champion de antes de la autovalidación del boost (2026-09-30): sin
+    # este campo, tratar como que NINGUNA estación pasó la prueba —
+    # comportamiento seguro por defecto (sin boost) hasta que se
+    # reentrene con el código nuevo, nunca "boostear todo a ciegas".
+    boost_validated_stations = feature_list.get("boost_validated_stations", [])
     return {
         "model": bundle["model"],
         "station_categories": bundle["station_categories"],
         "feature_cols": feature_list["features"],
         "mix_weights_by_station": mix_weights_by_station,
+        "boost_validated_stations": boost_validated_stations,
     }
 
 
-def champion_accuracy_on(champ_bundle, train_df, test_df):
+def champion_accuracy_on(champ_bundle, train_df, test_df, drifted_stations=None, horizon_min=None):
     """Reconstruye la predicción híbrida EXACTA del champion (su modelo GBM
     congelado + sus pesos de mezcla naive/fast/gbm por estación, también
     congelados) pero prediciendo sobre la ventana de test de HOY. Así el
     delta contra el candidato es una comparación real, no contra un número
-    viejo."""
+    viejo.
+
+    `drifted_stations`/`horizon_min` se pasan igual que al candidato (ver
+    train_mod.hybrid_predict / compute_fast_boost) para que el boost
+    reactivo aplique parejo en ambos lados — comparar un candidato CON
+    boost contra un champion SIN boost inflaría el delta de forma
+    artificial."""
     if champ_bundle is None:
         return None, {}
     naive_pred = train_mod.naive_baseline(train_df, test_df)
@@ -120,7 +144,8 @@ def champion_accuracy_on(champ_bundle, train_df, test_df):
     X_test = test_df[champ_bundle["feature_cols"]].copy()
     X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=champ_bundle["station_categories"])
     gbm_pred = np.clip(champ_bundle["model"].predict(X_test), 0, None)
-    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, champ_bundle["mix_weights_by_station"])
+    hybrid_pred = train_mod.hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, champ_bundle["mix_weights_by_station"],
+                                            drifted_stations=drifted_stations, horizon_min=horizon_min)
     by_station = train_mod.evaluate_by_station(test_df, hybrid_pred)
     overall = by_station["accuracy"].mean()
     return overall, dict(zip(by_station["station_id"], by_station["accuracy"]))
@@ -134,6 +159,7 @@ def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_in
         "features": train_mod.FEATURE_COLS,
         "winner_by_station": summary_row["winner_by_station"],
         "mix_weights_by_station": summary_row["mix_weights_by_station"],
+        "boost_validated_stations": summary_row["boost_validated_stations"],
         "gbm_loss": "poisson",
         "early_stopping": True,
     }
@@ -200,9 +226,10 @@ def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ
             if sid in champ_by_station and champ_by_station[sid] >= CHAMPION_FLOOR_ACCURACY_STATION
         }
         worst_station, worst_regression = min(regressions.items(), key=lambda kv: kv[1], default=(None, 0.0))
-        should_promote = delta >= MIN_IMPROVEMENT and worst_regression >= -MAX_STATION_REGRESSION
+        min_improvement = MIN_IMPROVEMENT_BY_HORIZON[horizon_min]
+        should_promote = delta >= min_improvement and worst_regression >= -MAX_STATION_REGRESSION
         reason = (
-            f"delta promedio={delta:+.2f} (umbral +{MIN_IMPROVEMENT}), "
+            f"delta promedio={delta:+.2f} (umbral +{min_improvement}), "
             f"peor caída por estación={worst_regression:+.2f} en {worst_station} "
             f"(tolerancia -{MAX_STATION_REGRESSION}, ignorando estaciones con champion ya < {CHAMPION_FLOOR_ACCURACY_STATION})"
         )
@@ -245,7 +272,10 @@ def main():
         model_id, agg_acc = register_candidate(horizon_min, row, code_commit, version, cutoff_inicio, cutoff_fin)
 
         champ_bundle = load_champion_bundle(horizon_min)
-        champ_accuracy_mean, champ_by_station = champion_accuracy_on(champ_bundle, row["_full_train_df"], row["_test_df"])
+        champ_accuracy_mean, champ_by_station = champion_accuracy_on(
+            champ_bundle, row["_full_train_df"], row["_test_df"],
+            drifted_stations=row["boost_validated_stations"], horizon_min=horizon_min,
+        )
 
         promoted, reason = decide_and_promote(horizon_min, model_id, row, champ_accuracy_mean, champ_by_station)
         decisions.append({"horizon_min": horizon_min, "model_id": model_id, "accuracy": agg_acc, "promoted": promoted, "reason": reason})
