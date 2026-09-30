@@ -69,7 +69,13 @@ FEATURE_COLS = [
     "momentum_vs_ayer", "drift_4h_vs_24h", "short_slope",
     "rain_mm", "temperature_c", "event_intensity",
 ]
-N_ENSEMBLE = 3  # cuántos HistGradientBoostingRegressor se promedian (bagging)
+N_ENSEMBLE = 5  # cuántos HistGradientBoostingRegressor se promedian (bagging).
+# Subido de 3 a 5 (2026-09-30): +15min quedaba a centésimas del umbral de
+# promoción, un margen del orden de la varianza normal de reentrenar — más
+# miembros de bagging reduce esa varianza (nunca cambia la señal real que
+# el modelo aprende, solo promedia más semillas), a costa de ~67% más
+# tiempo de entrenamiento del GBM. Se prueba con backtest real antes de
+# confiar en que ayuda, igual que cualquier otro cambio.
 ARTIFACTS_DIR = Path(__file__).parent.parent / "artifacts"
 
 
@@ -295,10 +301,13 @@ MAX_GBM_WEIGHT_DRIFTED = 0.5  # PROBADO Y DESCARTADO (2026-09-30) — no se usa
 # demasiado agresivo — no repetir sin evidencia nueva.
 
 
-def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.1,
+def blend_weights_3way(val_df, naive_pred, fast_pred, gbm_pred, grid_step=0.05,
                         drifted_stations=None, max_gbm_drifted=MAX_GBM_WEIGHT_DRIFTED):
-    """Por estación, busca por grid search (barato: ~66 combinaciones con
-    paso 0.1) los pesos (w_gbm, w_fast) que maximizan accuracy en
+    """Por estación, busca por grid search (barato: ~231 combinaciones con
+    paso 0.05 — subido de 0.1 el 2026-09-30, +15min quedaba a centésimas
+    del umbral de promoción y una grilla más fina solo puede igualar o
+    mejorar lo que ya elegía la gruesa, nunca empeorarlo) los pesos
+    (w_gbm, w_fast) que maximizan accuracy en
     VALIDACIÓN de la mezcla w_gbm*gbm + w_fast*fast + (1-w_gbm-w_fast)*naive
     — nunca en test. Reemplaza blend_weights_from_validation (mezcla
     naive/GBM únicamente) porque agregar naive_fast_baseline como tercer
