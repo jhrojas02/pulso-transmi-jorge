@@ -15,6 +15,13 @@ print(r.status_code, r.text[:2000])
 
 import json as jsonlib
 
+print("\n=== raw leaderboard row (cumulative, primeras 3) ===")
+r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": "cumulative"}, headers=headers, timeout=15)
+raw = r.json()
+print("keys del payload:", list(raw.keys()))
+for row in raw["data"][:3]:
+    print(jsonlib.dumps(row, indent=2))
+
 boards = {}
 for window in ["cumulative", "rolling_24h"]:
     r = requests.get(f"{API_BASE}/v1/leaderboard", params={"window": window}, headers=headers, timeout=15)
