@@ -419,16 +419,32 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     w_gbm = sids.map(lambda s: mix_weights_by_station.get(s, default)["gbm"]).to_numpy()
     w_fast = sids.map(lambda s: mix_weights_by_station.get(s, default)["fast"]).to_numpy()
     # w_boost es un peso APARTE del w_fast base: multiplica a boost_fast_pred
-    # (lag_1), nunca a fast_pred (rolling_mean_4h) — así el boost no cambia
-    # el peso de rolling_mean_4h que ya eligió blend_weights_3way, solo
-    # agrega una porción nueva de lag_1 encima.
+    # (lag_1/tendencia), nunca a fast_pred (rolling_mean_4h) — así el boost
+    # no cambia el peso de rolling_mean_4h que ya eligió blend_weights_3way,
+    # solo agrega una porción nueva encima.
     w_boost = np.zeros(len(sids))
+    w_gbm_eff = w_gbm
     if drifted_stations and horizon_min is not None:
         is_drifted = sids.isin(drifted_stations).to_numpy()
         w_boost = compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min)
-        w_boost = np.clip(w_boost, 0, np.clip(1.0 - w_gbm - w_fast, 0, None))
-    w_naive = 1.0 - w_gbm - w_fast - w_boost
-    return w_naive * naive_pred + w_fast * fast_pred + w_boost * boost_fast_pred + w_gbm * gbm_pred
+        # El boost puede comerle espacio a w_gbm (no solo al sobrante de
+        # 1-w_gbm-w_fast) — 2026-09-30, diagnosticado con datos reales:
+        # blend_weights_3way elige w_gbm en validación, ANTES de que el
+        # quiebre grande ocurriera (ej. 05000 +73%: w_gbm=0.80, apenas
+        # 0.20 de espacio para el boost aunque la desviación real fuera
+        # mucho mayor que eso — el boost quedaba topado muy por debajo de
+        # lo que la señal pedía). w_naive y w_fast NUNCA se tocan, solo
+        # w_gbm cede su espacio — preferimos confiar más en la señal
+        # reactiva que en un GBM entrenado mayormente con el régimen
+        # viejo, pero sin tocar los componentes ya validados aparte.
+        # Sigue pasando por la MISMA autovalidación por estación/horizonte
+        # que cualquier otro cambio al boost (ver run()).
+        w_boost = np.clip(w_boost, 0, np.clip(1.0 - w_fast, 0, None))
+        room_original = np.clip(1.0 - w_gbm - w_fast, 0, None)
+        excess = np.clip(w_boost - room_original, 0, None)
+        w_gbm_eff = np.clip(w_gbm - excess, 0, None)
+    w_naive = 1.0 - w_gbm_eff - w_fast - w_boost
+    return w_naive * naive_pred + w_fast * fast_pred + w_boost * boost_fast_pred + w_gbm_eff * gbm_pred
 
 
 def run(observations: pd.DataFrame, context: pd.DataFrame):

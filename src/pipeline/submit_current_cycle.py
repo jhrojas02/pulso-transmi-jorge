@@ -269,25 +269,32 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
 
         mix = model["blend_weight_by_horizon"].get(horizon_min, {}).get(sid, {"gbm": 0.0, "fast": 0.0})
         w_gbm, w_fast = mix["gbm"], mix["fast"]
-        # w_boost es aparte de w_fast: multiplica a boost_value (lag_1),
+        # w_boost es aparte de w_fast: multiplica a boost_value (tendencia),
         # nunca a fast_value (rolling_mean_4h) — mismo diseño que
         # train.hybrid_predict, ver ese docstring para el porqué.
         w_boost = 0.0
+        w_gbm_eff = w_gbm
         boost_validated = model.get("boost_validated_by_horizon", {}).get(horizon_min, set())
         if drifted_stations and sid in drifted_stations and sid in boost_validated:
             w_boost = train_mod.compute_fast_boost([naive_value], [boost_value], [True], horizon_min)[0]
-            w_boost = min(w_boost, max(0.0, 1.0 - w_gbm - w_fast))
+            # El boost puede comerle espacio a w_gbm, no solo al sobrante —
+            # mismo cambio y mismo motivo que train.hybrid_predict (ver ese
+            # docstring): nunca toca w_naive/w_fast, solo reduce w_gbm.
+            w_boost = min(w_boost, max(0.0, 1.0 - w_fast))
+            room_original = max(0.0, 1.0 - w_gbm - w_fast)
+            excess = max(0.0, w_boost - room_original)
+            w_gbm_eff = max(0.0, w_gbm - excess)
         feature_cols = model["feature_cols_by_horizon"].get(horizon_min, FEATURE_COLS)
         has_nan_features = any(pd.isna(combined.get(c)) for c in feature_cols)
-        if w_gbm > 0 and horizon_min in model["models"] and not has_nan_features:
+        if w_gbm_eff > 0 and horizon_min in model["models"] and not has_nan_features:
             bundle = model["models"][horizon_min]
             X = pd.DataFrame([{c: combined[c] for c in feature_cols}])
             X["station_id"] = pd.Categorical(X["station_id"], categories=bundle["station_categories"])
             gbm_value = float(bundle["model"].predict(X)[0])
         else:
-            gbm_value, w_gbm = 0.0, 0.0
-        w_naive = 1.0 - w_gbm - w_fast - w_boost
-        value = w_naive * naive_value + w_fast * fast_value + w_boost * boost_value + w_gbm * gbm_value
+            gbm_value, w_gbm_eff = 0.0, 0.0
+        w_naive = 1.0 - w_gbm_eff - w_fast - w_boost
+        value = w_naive * naive_value + w_fast * fast_value + w_boost * boost_value + w_gbm_eff * gbm_value
 
         value = max(0.0, value)
         predictions.append({
