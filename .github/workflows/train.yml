@@ -24,7 +24,12 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # DATABASE_URL (Plan B / Neon) deshabilitada temporalmente: cuota de Neon excedida.
-          # Fallback a Supabase hasta restablecer Neon. Ver docs/plan-b-postgres.md.
+          # Reactivada 2026-09-30: Supabase REST/Storage devuelve 402 (cuota
+          # de Cached Egress agotada hasta el 17 de octubre) — DATABASE_URL
+          # ahora apunta a la conexión directa a Postgres de la MISMA base
+          # de Supabase (no Neon), que no cuenta contra esa cuota. Los
+          # modelos champion ya se migraron a model_blob (ver
+          # migrate-model-blob.yml). Ver docs/plan-b-postgres.md.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GITHUB_SHA: ${{ github.sha }}
         run: python -m src.pipeline.promote

@@ -1,0 +1,35 @@
+name: pulso-transmi-migrate-model-blob
+
+# Migración puntual de una sola vez: copia los .joblib de los champions
+# actuales desde la caché de GitHub Actions (restaurada con la misma key
+# que usa predict.yml) hacia la tabla model_blob en Supabase, vía
+# DATABASE_URL (conexión directa a Postgres) — necesario porque la API de
+# Storage de Supabase está bloqueada por la cuota de Cached Egress
+# agotada (402) hasta el 17 de octubre. Solo workflow_dispatch, nunca se
+# dispara solo. Seguro de repetir.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restaurar caché de modelos champion
+        uses: actions/cache@v4
+        with:
+          path: .model_cache
+          key: model-cache-nonexistent-force-restore-key
+          restore-keys: |
+            model-cache-
+      - name: Migrar a model_blob
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scripts.migrate_models_from_cache
