@@ -237,12 +237,32 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
     boostea a ciegas, espera al próximo reentrenamiento que la valide."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
+    # Último recurso para una estación que ni siquiera tiene media histórica
+    # propia (nunca vista, o el profe la agrega hoy en medio de más drift) —
+    # el promedio entre estaciones sigue siendo mejor que dejar el target sin
+    # responder: ver el `continue` que esto reemplaza más abajo.
+    global_fallback = float(station_mean.mean()) if len(station_mean) else 0.0
     predictions = []
     for t in targets:
         sid = t["station_id"]
         horizon_min = t["horizon_minutes"]
         feat_row = cutoff_row_by_station.get(sid)
         if feat_row is None:
+            # Sin fila de features (estación nueva hoy, o sin ninguna
+            # observación aún en el cutoff): antes esto hacía `continue` y
+            # dejaba el target sin responder, lo que revienta
+            # validate_exact_targets ("Faltan: {...}") y aborta el envío
+            # de TODO el ciclo — las otras 11 estaciones se quedaban sin
+            # predicción también por culpa de una sola. Mejor responder
+            # con el mejor naive disponible (media de la estación si existe,
+            # si no la media global) que perder el ciclo completo.
+            naive_value = float(station_mean.get(sid, global_fallback))
+            predictions.append({
+                "station_id": sid,
+                "target_at": t["target_at"],
+                "horizon_minutes": horizon_min,
+                "value": round(max(0.0, naive_value), 2),
+            })
             continue
 
         tgt = target_time_features(t["target_at"])
