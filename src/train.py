@@ -379,8 +379,21 @@ TREND_DAMPING_PHI = 0.85  # amortigua la extrapolación en horizontes largos
 # -0.35 en 02300 +15min). Barrido de phi en {1.0(sin amortiguar), 0.9, 0.85,
 # 0.8, 0.7}: 0.85 fue el mejor promedio (71.16 vs. 70.79 sin amortiguar).
 
+TREND_MAX_RELATIVE_DEVIATION = 0.5  # tope adicional sobre lag_1 — 2026-09-30:
+# aun amortiguada, 03000 tiene transiciones tan extremas (ej. 116->969 en
+# ~2.5h) que la extrapolación seguía sobrecorrigiendo en +45/+60min. Este
+# tope (nunca alejarse de lag_1 más de un 50% en ninguna dirección) es un
+# freno de emergencia independiente del amortiguamiento: no cambia nada en
+# la mayoría de los ciclos (la pendiente amortiguada rara vez llega a ese
+# punto), pero corta los peores sobresaltos. Barrido real de tope en
+# {ninguno, 1.0, 0.7, 0.5, 0.35} sobre las 6 estaciones con quiebre: 0.5 fue
+# empate o mejora en LOS 24 pares estación×horizonte (nunca empeoró
+# ninguno), con la mayor ganancia justo en 03000/05100 +45/+60min (+0.48
+# promedio) — el foco de esta sesión.
 
-def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps, phi=TREND_DAMPING_PHI):
+
+def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps, phi=TREND_DAMPING_PHI,
+                                        max_relative_deviation=TREND_MAX_RELATIVE_DEVIATION):
     """Variante de trend_extrapolated_signal con pendiente SUAVIZADA sobre
     1h (4 pasos) en vez de un solo par de lags — 2026-09-30: en estaciones
     con caída sostenida pero muy volátil paso a paso (05100: sube y baja
@@ -396,7 +409,11 @@ def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps, phi=TREND_D
     slope*phi*(1-phi**horizon_steps)/(1-phi) — cada paso adicional pesa
     phi veces el anterior, así que la extrapolación se aplana en vez de
     seguir creciendo sin límite. Con phi=1.0 es exactamente la versión
-    sin amortiguar (factor=horizon_steps)."""
+    sin amortiguar (factor=horizon_steps).
+
+    Además se topa a `max_relative_deviation` de lag_1 (ver
+    TREND_MAX_RELATIVE_DEVIATION) — freno adicional para los casos donde
+    ni el amortiguamiento alcanza a evitar el sobresalto."""
     lag_1 = np.asarray(lag_1, dtype=float)
     lag_1h = np.asarray(lag_1h, dtype=float)
     slope = (lag_1 - lag_1h) / 3.0
@@ -404,7 +421,10 @@ def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps, phi=TREND_D
         factor = horizon_steps
     else:
         factor = phi * (1 - phi ** horizon_steps) / (1 - phi)
-    return np.clip(lag_1 + slope * factor, 0, None)
+    value = lag_1 + slope * factor
+    if max_relative_deviation is not None:
+        value = np.clip(value, lag_1 * (1 - max_relative_deviation), lag_1 * (1 + max_relative_deviation))
+    return np.clip(value, 0, None)
 
 
 FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
