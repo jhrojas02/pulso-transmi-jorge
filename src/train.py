@@ -366,7 +366,21 @@ def trend_extrapolated_signal(lag_1, lag_2, horizon_steps):
     return np.clip(lag_1 + slope * horizon_steps, 0, None)
 
 
-def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps):
+TREND_DAMPING_PHI = 0.85  # amortigua la extrapolación en horizontes largos
+# (Holt damped trend) — 2026-09-30: 02300/03000/05000/05100/06000/07111 tienen
+# un ciclo diario fuerte (pico ~10:30-13:00, casi 0 de noche); durante la
+# bajada/subida de ese pico la pendiente de 1h es enorme y NO sigue siendo así
+# 45-60min después (el nivel se aplana, no sigue cayendo/subiendo en línea
+# recta) — extrapolar esa pendiente sin amortiguar sobreestima sistemáticamente
+# en +45/+60min. phi=0.85 (cada paso adicional pesa 0.85 del anterior, geométrico
+# en vez de lineal) validado con backtest real sobre datos crudos de las 6
+# estaciones con quiebre: gana en TODOS los horizontes >=45min de las 6
+# estaciones (hasta +1.63 en 07111 +60min), neutral en +15/+30min (peor caso
+# -0.35 en 02300 +15min). Barrido de phi en {1.0(sin amortiguar), 0.9, 0.85,
+# 0.8, 0.7}: 0.85 fue el mejor promedio (71.16 vs. 70.79 sin amortiguar).
+
+
+def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps, phi=TREND_DAMPING_PHI):
     """Variante de trend_extrapolated_signal con pendiente SUAVIZADA sobre
     1h (4 pasos) en vez de un solo par de lags — 2026-09-30: en estaciones
     con caída sostenida pero muy volátil paso a paso (05100: sube y baja
@@ -375,13 +389,22 @@ def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps):
     boost reacciona mal justo cuando más se necesita. (lag_1-lag_1h)/3
     promedia 3 diferencias consecutivas de 15min (telescopado), mucho más
     estable, sin perder capacidad de reaccionar dentro de la misma hora.
-    Se compara EN EL MISMO backtest contra la versión de 2 puntos antes de
-    decidir cuál usar en producción — igual que la aditiva vs. la
-    multiplicativa el 2026-09-30 (esa comparación la ganó la aditiva)."""
+
+    La extrapolación se AMORTIGUA geométricamente (ver TREND_DAMPING_PHI):
+    en vez de sumar slope*horizon_steps (line recta, sobreestima en
+    horizontes largos durante picos/valles del ciclo diario), se suma
+    slope*phi*(1-phi**horizon_steps)/(1-phi) — cada paso adicional pesa
+    phi veces el anterior, así que la extrapolación se aplana en vez de
+    seguir creciendo sin límite. Con phi=1.0 es exactamente la versión
+    sin amortiguar (factor=horizon_steps)."""
     lag_1 = np.asarray(lag_1, dtype=float)
     lag_1h = np.asarray(lag_1h, dtype=float)
     slope = (lag_1 - lag_1h) / 3.0
-    return np.clip(lag_1 + slope * horizon_steps, 0, None)
+    if phi >= 1.0:
+        factor = horizon_steps
+    else:
+        factor = phi * (1 - phi ** horizon_steps) / (1 - phi)
+    return np.clip(lag_1 + slope * factor, 0, None)
 
 
 FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
