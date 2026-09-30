@@ -339,6 +339,29 @@ def trend_extrapolated_signal(lag_1, lag_2, horizon_steps):
     return np.clip(lag_1 + slope * horizon_steps, 0, None)
 
 
+def trend_extrapolated_signal_multiplicative(lag_1, lag_2, horizon_steps):
+    """Variante PROPORCIONAL de trend_extrapolated_signal: extrapola la
+    tasa de cambio porcentual (lag_1/lag_2) en vez de la cantidad
+    absoluta. Motivada por la demanda real de 05100 (2026-09-30): la
+    caída diaria ABSOLUTA se desacelera a medida que baja el nivel
+    (-131/día en ~545, -73/día en ~270) — la tasa PORCENTUAL es más
+    estable que la absoluta, así que extrapolar un % constante debería
+    ajustar mejor que sumar una cantidad fija (que además arriesga
+    sobrecorregir hacia 0 en +45/+60min antes de que el clip actúe).
+    `ratio` se acota a [0.5, 2.0] por paso de 15min — un solo outlier
+    puntual entre lag_1 y lag_2 no debería extrapolarse a una explosión
+    o colapso total en 4 pasos. Debe pasar por la misma autovalidación
+    que cualquier señal de boost — se compara EN EL MISMO backtest
+    contra trend_extrapolated_signal (aditiva) antes de decidir cuál
+    usar en producción, nunca a ciegas."""
+    lag_1 = np.asarray(lag_1, dtype=float)
+    lag_2 = np.asarray(lag_2, dtype=float)
+    lag_2_safe = np.where(lag_2 <= 0, np.nan, lag_2)
+    ratio = np.nan_to_num(lag_1 / lag_2_safe, nan=1.0, posinf=1.0, neginf=1.0)
+    ratio = np.clip(ratio, 0.5, 2.0)
+    return np.clip(lag_1 * np.power(ratio, horizon_steps), 0, None)
+
+
 FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
 # señal del boost (ver más abajo) deja de haber horizontes "malos" — a
 # diferencia del intento anterior (2026-09-29) con rolling_mean_4h, que
@@ -517,6 +540,18 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         hybrid_pred_con_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                                 drifted_stations=drifted_stations, horizon_min=horizon_min)
         hybrid_acc_con_boost = evaluate_by_station(test_df, hybrid_pred_con_boost).set_index("station_id")["accuracy"]
+        # Comparación puntual (2026-09-30, NO afecta la producción todavía):
+        # misma autovalidación pero con la variante multiplicativa del
+        # boost (trend_extrapolated_signal_multiplicative) en vez de la
+        # aditiva, para decidir con backtest real cuál de las dos usar
+        # antes de tocar hybrid_predict/submit_current_cycle.py.
+        boost_mult_signal = trend_extrapolated_signal_multiplicative(
+            test_df["lag_1"], test_df["lag_2"], horizon_min // 15
+        )
+        hybrid_pred_con_boost_mult = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                                                      drifted_stations=drifted_stations, horizon_min=horizon_min,
+                                                      boost_fast_pred=boost_mult_signal)
+        hybrid_acc_con_boost_mult = evaluate_by_station(test_df, hybrid_pred_con_boost_mult).set_index("station_id")["accuracy"]
         boost_validated_stations = {
             sid: drifted_stations[sid] for sid in drifted_stations
             if sid in hybrid_acc_con_boost.index and hybrid_acc_con_boost[sid] > hybrid_acc_sin_boost[sid]
@@ -533,8 +568,8 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             for sid in drifted_stations:
                 if sid in hybrid_acc_sin_boost.index and sid in hybrid_acc_con_boost.index:
                     print(f"     {sid}: sin_boost={hybrid_acc_sin_boost[sid]:.2f}  "
-                          f"con_boost(trend)={hybrid_acc_con_boost[sid]:.2f}  "
-                          f"delta={hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f}")
+                          f"aditivo={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
+                          f"multiplicativo={hybrid_acc_con_boost_mult[sid]:.2f} ({hybrid_acc_con_boost_mult[sid] - hybrid_acc_sin_boost[sid]:+.2f})")
 
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                       drifted_stations=boost_validated_stations, horizon_min=horizon_min)
