@@ -366,6 +366,24 @@ def trend_extrapolated_signal(lag_1, lag_2, horizon_steps):
     return np.clip(lag_1 + slope * horizon_steps, 0, None)
 
 
+def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps):
+    """Variante de trend_extrapolated_signal con pendiente SUAVIZADA sobre
+    1h (4 pasos) en vez de un solo par de lags — 2026-09-30: en estaciones
+    con caída sostenida pero muy volátil paso a paso (05100: sube y baja
+    30-50 unidades de un ciclo a otro incluso en plena caída), lag_1-lag_2
+    a veces da pendiente positiva por puro ruido de un solo punto, y el
+    boost reacciona mal justo cuando más se necesita. (lag_1-lag_1h)/3
+    promedia 3 diferencias consecutivas de 15min (telescopado), mucho más
+    estable, sin perder capacidad de reaccionar dentro de la misma hora.
+    Se compara EN EL MISMO backtest contra la versión de 2 puntos antes de
+    decidir cuál usar en producción — igual que la aditiva vs. la
+    multiplicativa el 2026-09-30 (esa comparación la ganó la aditiva)."""
+    lag_1 = np.asarray(lag_1, dtype=float)
+    lag_1h = np.asarray(lag_1h, dtype=float)
+    slope = (lag_1 - lag_1h) / 3.0
+    return np.clip(lag_1 + slope * horizon_steps, 0, None)
+
+
 FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
 # señal del boost (ver más abajo) deja de haber horizontes "malos" — a
 # diferencia del intento anterior (2026-09-29) con rolling_mean_4h, que
@@ -499,7 +517,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         horizon_steps = horizon_min // 15
         df_h = shift_target_for_horizon(base, horizon_steps).dropna(
             subset=[
-                "lag_1", "lag_2", "lag_4_96", "lag_672",
+                "lag_1", "lag_2", "lag_1h", "lag_4_96", "lag_672",
                 "rolling_mean_24h", "rolling_std_24h", "rolling_mean_4h", "rolling_std_4h",
                 "momentum_vs_ayer", "drift_4h_vs_24h",
             ]
@@ -564,6 +582,16 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         hybrid_pred_con_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                                 drifted_stations=drifted_stations, horizon_min=horizon_min)
         hybrid_acc_con_boost = evaluate_by_station(test_df, hybrid_pred_con_boost).set_index("station_id")["accuracy"]
+        # Comparación puntual (2026-09-30, NO afecta producción todavía):
+        # misma autovalidación pero con la pendiente SUAVIZADA (1h, 4 pasos)
+        # en vez de la de un solo par de lags — ver
+        # trend_extrapolated_signal_smoothed para el motivo (05100 es muy
+        # ruidosa paso a paso incluso en plena caída).
+        smoothed_signal = trend_extrapolated_signal_smoothed(test_df["lag_1"], test_df["lag_1h"], horizon_min // 15)
+        hybrid_pred_con_boost_smooth = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
+                                                        drifted_stations=drifted_stations, horizon_min=horizon_min,
+                                                        boost_fast_pred=smoothed_signal)
+        hybrid_acc_con_boost_smooth = evaluate_by_station(test_df, hybrid_pred_con_boost_smooth).set_index("station_id")["accuracy"]
         boost_validated_stations = {
             sid: drifted_stations[sid] for sid in drifted_stations
             if sid in hybrid_acc_con_boost.index and hybrid_acc_con_boost[sid] > hybrid_acc_sin_boost[sid]
@@ -582,7 +610,8 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
                     w = mix_weights_by_station.get(sid, {"gbm": 0.0, "fast": 0.0})
                     room = max(0.0, 1.0 - w["gbm"] - w["fast"])
                     print(f"     {sid}: sin_boost={hybrid_acc_sin_boost[sid]:.2f}  "
-                          f"con_boost={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
+                          f"2pts={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
+                          f"suavizado_1h={hybrid_acc_con_boost_smooth[sid]:.2f} ({hybrid_acc_con_boost_smooth[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
                           f"w_gbm={w['gbm']:.2f} w_fast={w['fast']:.2f} espacio_boost={room:.2f}")
 
             # Barrido de threshold/k (2026-09-30): probado, ganancia marginal

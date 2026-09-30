@@ -69,6 +69,7 @@ import pandas as pd
 STEP_MINUTES = 15
 LAG_1_STEPS = 1
 LAG_2_STEPS = 2
+LAG_4_STEPS = 4  # 1h atrás — base de la pendiente suavizada (ver smoothed_slope)
 LAG_DAY_STEPS = 96  # 24h / 15min
 LAG_WEEK_STEPS = 672  # 7 días / 15min
 ROLLING_STEPS = 96  # 24h
@@ -106,6 +107,7 @@ def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd
     g = df.groupby("station_id")["demand"]
     df["lag_1"] = g.shift(LAG_1_STEPS)
     df["lag_2"] = g.shift(LAG_2_STEPS)
+    df["lag_1h"] = g.shift(LAG_4_STEPS)  # 1h atrás (4 pasos de 15min) — base de smoothed_slope
     df["lag_4_96"] = g.shift(LAG_DAY_STEPS)
     df["lag_672"] = g.shift(LAG_WEEK_STEPS)
     shifted = g.shift(1)
@@ -140,13 +142,23 @@ def build_feature_frame(observations: pd.DataFrame, context: pd.DataFrame) -> pd
     # contexto (hora, estación, magnitud), en vez de depender solo de la
     # mezcla fija que aplica compute_fast_boost después.
     df["short_slope"] = df["lag_1"] - df["lag_2"]
+    # `smoothed_slope`: pendiente promedio de los últimos 4 pasos (1h),
+    # (lag_1-lag_1h)/3 — equivale al telescopado de 3 diferencias
+    # consecutivas de 15min. 2026-09-30: short_slope/lag_2 (un solo paso)
+    # resultó muy ruidoso para el boost reactivo en estaciones con caída
+    # sostenida pero volátil (05100: la demanda sube y baja 30-50 unidades
+    # de un paso a otro incluso en plena caída) — un solo par de lags a
+    # veces da pendiente positiva por puro ruido, aunque la tendencia real
+    # sea negativa. Promediar sobre 1h da una estimación mucho más estable
+    # sin dejar de reaccionar dentro de la misma hora.
+    df["smoothed_slope"] = (df["lag_1"] - df["lag_1h"]) / 3
 
     df["target_demand"] = df["demand"].astype(float)
 
     cols = [
         "station_id", "observed_at", "hour", "day_of_week", "is_weekend",
-        "lag_1", "lag_2", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
-        "rolling_mean_4h", "rolling_std_4h", "short_slope",
+        "lag_1", "lag_2", "lag_1h", "lag_4_96", "lag_672", "rolling_mean_24h", "rolling_std_24h",
+        "rolling_mean_4h", "rolling_std_4h", "short_slope", "smoothed_slope",
         "momentum_vs_ayer", "drift_4h_vs_24h",
         "rain_mm", "temperature_c", "event_intensity",
         "target_demand",
