@@ -234,32 +234,11 @@ def naive_baseline(train_df, test_df):
     return merged["y_pred"].to_numpy()
 
 
-GBM_SAMPLE_WEIGHT_HALFLIFE_DAYS = 3  # 2026-10-01: antes el GBM entrenaba
-# con TODO el histórico (~2 meses) pesado por igual — un régimen nuevo
-# (ej. 07105/10009/06111/09122 pasando de un pico diario a oscilar cada
-# ~2h) solo lleva unas horas de datos, así que se diluye casi a nada entre
-# 2 meses de datos del régimen viejo. Pesar las muestras por recencia
-# (mismo mecanismo que weighted_naive_tables, pero aplicado al GBM vía
-# sample_weight) deja que los árboles aprendan el patrón nuevo mucho más
-# rápido. Barrido real de halflife en {sin peso, 14, 7, 3, 1} días sobre
-# las últimas 24h de test: +15min mejora +3.7 a +3.9pts con cualquier
-# halflife corto (mejor en 7-1d), +30min +2.0 a +2.8pts (mejor en 1d),
-# +45/+60min solo mejoran con halflife=3d (+0.3 a +0.6pts; con 1d
-# EMPEORAN -0.5 a -0.7pts, demasiado agresivo para horizontes largos que
-# necesitan más variedad histórica). halflife=3d es el único valor que
-# gana en LOS 4 horizontes a la vez — se usa como default único.
-
-
-def gbm_candidate(train_df, test_df, station_categories, sample_weight_halflife_days=GBM_SAMPLE_WEIGHT_HALFLIFE_DAYS):
+def gbm_candidate(train_df, test_df, station_categories):
     X_train = train_df[FEATURE_COLS].copy()
     X_test = test_df[FEATURE_COLS].copy()
     X_train["station_id"] = pd.Categorical(X_train["station_id"], categories=station_categories)
     X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=station_categories)
-
-    sample_weight = None
-    if sample_weight_halflife_days is not None:
-        age_days = (train_df["observed_at"].max() - train_df["observed_at"]).dt.total_seconds() / 86400
-        sample_weight = np.exp(-np.log(2) * age_days / sample_weight_halflife_days).to_numpy()
 
     models = []
     for i in range(N_ENSEMBLE):
@@ -283,7 +262,7 @@ def gbm_candidate(train_df, test_df, station_categories, sample_weight_halflife_
             n_iter_no_change=20,
             random_state=42 + i,
         )
-        m.fit(X_train, train_df["target_demand"], sample_weight=sample_weight)
+        m.fit(X_train, train_df["target_demand"])
         models.append(m)
 
     model = BaggedGBM(models)
