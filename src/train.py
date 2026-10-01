@@ -39,6 +39,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
+from catboost import CatBoostRegressor
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.features import build_feature_frame, shift_target_for_horizon
@@ -76,6 +77,11 @@ N_ENSEMBLE = 5  # cuántos HistGradientBoostingRegressor se promedian (bagging).
 # el modelo aprende, solo promedia más semillas), a costa de ~67% más
 # tiempo de entrenamiento del GBM. Se prueba con backtest real antes de
 # confiar en que ayuda, igual que cualquier otro cambio.
+CATBOOST_N_ENSEMBLE = 3  # bagging más chico que el sklearn GBM (N_ENSEMBLE=5):
+# CatBoost solo se entrena para la SELECCIÓN por estación (ver
+# gbm_model_type_by_station en run()), no reemplaza al sklearn GBM en todas
+# partes, así que se prioriza mantener el tiempo total de entrenamiento
+# razonable sobre exprimir el último punto de varianza.
 ARTIFACTS_DIR = Path(__file__).parent.parent / "artifacts"
 
 
@@ -268,6 +274,84 @@ def gbm_candidate(train_df, test_df, station_categories):
     model = BaggedGBM(models)
     y_pred = np.clip(model.predict(X_test), 0, None)
     return model, y_pred
+
+
+class BaggedCatBoost:
+    """Igual que BaggedGBM pero para CatBoostRegressor — necesita
+    station_id como string (no pd.Categorical), CatBoost maneja la
+    categórica internamente vía cat_features."""
+
+    def __init__(self, models):
+        self.models = models
+
+    def predict(self, X):
+        X = X.copy()
+        X["station_id"] = X["station_id"].astype(str)
+        preds = np.column_stack([m.predict(X) for m in self.models])
+        return preds.mean(axis=1)
+
+
+def gbm_candidate_catboost(train_df, test_df, station_categories):
+    """Candidato alternativo al GBM de sklearn — hallazgo del 2026-10-01
+    (inspirado en info PÚBLICA del leaderboard: un compañero con accuracy
+    muy alto reportaba usar CatBoost). Validado con backtest real contra
+    la MISMA ventana de 7 días que usa promote.py (ver test_catboost.py):
+    en general es PEOR que el sklearn GBM (-0.3 a -1.5 puntos en los 4
+    horizontes), pero dramáticamente MEJOR específicamente para 05100
+    (+15 a +20 puntos, consistente en los 4 horizontes) y algo mejor para
+    03000/09000. Por eso nunca reemplaza al GBM de sklearn por completo —
+    se usa solo para la selección por estación en run() (ver
+    gbm_model_type_by_station), igual que ya se hace gbm-vs-naive."""
+    cat_idx = FEATURE_COLS.index("station_id")
+    X_train = train_df[FEATURE_COLS].copy()
+    X_test = test_df[FEATURE_COLS].copy()
+    X_train["station_id"] = X_train["station_id"].astype(str)
+    X_test["station_id"] = X_test["station_id"].astype(str)
+
+    models = []
+    for i in range(CATBOOST_N_ENSEMBLE):
+        m = CatBoostRegressor(
+            loss_function="Poisson",  # misma razón que loss="poisson" en gbm_candidate
+            depth=8,
+            iterations=600,
+            learning_rate=0.05,
+            cat_features=[cat_idx],
+            random_seed=42 + i,
+            verbose=False,
+            early_stopping_rounds=20,
+        )
+        m.fit(X_train, train_df["target_demand"])
+        models.append(m)
+
+    model = BaggedCatBoost(models)
+    y_pred = np.clip(model.predict(X_test), 0, None)
+    return model, y_pred
+
+
+class PerStationGBM:
+    """Modelo híbrido por estación: cada estación usa el tipo de GBM que
+    ganó en SU PROPIA validación (sklearn HistGradientBoostingRegressor o
+    CatBoost) — ver gbm_model_type_by_station en run(). Nunca "todo a
+    CatBoost": el barrido real (2026-10-01) mostró que CatBoost gana fuerte
+    solo en 05100 (y algo en 03000/09000) pero pierde en el resto, así que
+    la selección es por estación, igual que naive-vs-gbm (winner_by_station)
+    y los pesos de mezcla (mix_weights_by_station)."""
+
+    def __init__(self, sklearn_model, catboost_model, station_type_map):
+        self.sklearn_model = sklearn_model
+        self.catboost_model = catboost_model
+        self.station_type_map = station_type_map  # station_id (str) -> "sklearn"|"catboost"
+
+    def predict(self, X):
+        X = X.reset_index(drop=True)
+        station_ids = X["station_id"].astype(str)
+        is_catboost = station_ids.map(lambda sid: self.station_type_map.get(sid) == "catboost").to_numpy()
+        preds = np.empty(len(X), dtype=float)
+        if (~is_catboost).any():
+            preds[~is_catboost] = self.sklearn_model.predict(X.loc[~is_catboost])
+        if is_catboost.any():
+            preds[is_catboost] = self.catboost_model.predict(X.loc[is_catboost])
+        return preds
 
 
 def naive_fast_baseline(df):
@@ -626,6 +710,23 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         val_naive_pred = naive_baseline(fit_train_df, val_df)
         val_fast_pred = naive_fast_baseline(val_df)
         _, val_gbm_pred = gbm_candidate(fit_train_df, val_df, station_categories)
+
+        # Selección por estación sklearn-vs-CatBoost (2026-10-01): se decide
+        # ACÁ, en validación, nunca asumido — mismo patrón que
+        # winner_by_station (gbm-vs-naive) más abajo. CatBoost solo gana en
+        # un puñado de estaciones (05100 sobre todo); el resto se queda con
+        # el GBM de sklearn. Ver gbm_candidate_catboost/PerStationGBM.
+        _, val_catboost_pred = gbm_candidate_catboost(fit_train_df, val_df, station_categories)
+        val_gbm_acc_sklearn = evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"]
+        val_gbm_acc_catboost = evaluate_by_station(val_df, val_catboost_pred).set_index("station_id")["accuracy"]
+        gbm_model_type_by_station = {
+            sid: ("catboost" if val_gbm_acc_catboost.get(sid, -1) > val_gbm_acc_sklearn.get(sid, -1) else "sklearn")
+            for sid in station_categories
+        }
+        val_station_ids = val_df["station_id"].astype(str).to_numpy()
+        val_type_arr = np.array([gbm_model_type_by_station.get(sid, "sklearn") for sid in val_station_ids])
+        val_gbm_pred = np.where(val_type_arr == "catboost", val_catboost_pred, val_gbm_pred)
+
         val_naive_acc = evaluate_by_station(val_df, val_naive_pred).set_index("station_id")["accuracy"]
         val_gbm_acc = evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"]
         winner_by_station = {
@@ -643,9 +744,17 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         fast_pred = naive_fast_baseline(test_df)
         fast_by_station = evaluate_by_station(test_df, fast_pred)
 
-        model, gbm_pred = gbm_candidate(full_train_df, test_df, station_categories)
+        model_sklearn, gbm_pred_sklearn = gbm_candidate(full_train_df, test_df, station_categories)
+        model_catboost, gbm_pred_catboost = gbm_candidate_catboost(full_train_df, test_df, station_categories)
+        model = PerStationGBM(model_sklearn, model_catboost, gbm_model_type_by_station)
+        test_station_ids = test_df["station_id"].astype(str).to_numpy()
+        test_type_arr = np.array([gbm_model_type_by_station.get(sid, "sklearn") for sid in test_station_ids])
+        gbm_pred = np.where(test_type_arr == "catboost", gbm_pred_catboost, gbm_pred_sklearn)
         gbm_by_station = evaluate_by_station(test_df, gbm_pred)
         gbm_overall_wape, gbm_overall_acc = wape_accuracy(test_df["target_demand"], gbm_pred)
+        if any(v == "catboost" for v in gbm_model_type_by_station.values()):
+            print(f"  -> CatBoost elegido (sobre sklearn GBM) en estaciones: "
+                  f"{[sid for sid, t in gbm_model_type_by_station.items() if t == 'catboost']}")
 
         # Autovalidación del boost (2026-09-30): antes de confiar en
         # `drifted_stations` a ciegas, se mide en ESTE MISMO test si el
@@ -705,6 +814,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             "boost_validated_stations": list(boost_validated_stations),
             "winner_by_station": winner_by_station,
             "mix_weights_by_station": mix_weights_by_station,
+            "gbm_model_type_by_station": gbm_model_type_by_station,
             "naive_accuracy_mean_stations": naive_by_station["accuracy"].mean(),
             "fast_accuracy_mean_stations": fast_by_station["accuracy"].mean(),
             "gbm_accuracy_mean_stations": gbm_by_station["accuracy"].mean(),

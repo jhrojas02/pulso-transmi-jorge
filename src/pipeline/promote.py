@@ -164,6 +164,7 @@ def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_in
         "winner_by_station": summary_row["winner_by_station"],
         "mix_weights_by_station": summary_row["mix_weights_by_station"],
         "boost_validated_stations": summary_row["boost_validated_stations"],
+        "gbm_model_type_by_station": summary_row.get("gbm_model_type_by_station", {}),
         "gbm_loss": "poisson",
         "early_stopping": True,
     }

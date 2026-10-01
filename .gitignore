@@ -7,3 +7,4 @@ data/
 artifacts/*.joblib
 .model_cache/
 .DS_Store
+catboost_info/
