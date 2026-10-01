@@ -209,17 +209,18 @@ def build_features_as_of(data_cutoff, targets):
     ctx_df = pd.DataFrame(context)
     base = build_feature_frame(obs_df, ctx_df)
 
-    # Se recalcula en cada ciclo (cada 10 min) con las observaciones recién
-    # sincronizadas, no solo en cada reentrenamiento — así el boost
-    # reactivo de predict_targets() reacciona tan rápido como llegan datos
-    # nuevos, sin esperar al próximo train.yml (ver train.compute_fast_boost).
+    # Solo diagnóstico/log (ver bug corregido 2026-10-01 en
+    # predict_targets): YA NO filtra qué estaciones reciben boost — eso lo
+    # decide únicamente model["boost_validated_by_horizon"], el resultado
+    # ya validado con backtest real al entrenar. Se recalcula cada ciclo
+    # igual, para que el log refleje el drift del momento.
     drifted_stations = train_mod.detect_drifted_stations(obs_df, cutoff_ts)
 
     cutoff_rows = base[base["observed_at"] == cutoff_ts]
     return {row["station_id"]: row for _, row in cutoff_rows.iterrows()}, base, drifted_stations
 
 
-def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None):
+def predict_targets(model, cutoff_row_by_station, targets):
     """Por cada target combina la fila de features del cutoff (lags,
     rolling, clima — lo que se sabe HOY) con target_hour/target_day_of_week
     calculados directo de `target_at` (lo único que describe el momento
@@ -228,13 +229,23 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
     Mezcla naive, fast (persistencia rolling_mean_4h) y GBM con los pesos
     congelados por estación (ver train.hybrid_predict) en vez de elegir uno
     solo — mismo criterio que usó el entrenamiento para esta versión de
-    champion. `drifted_stations` (recalculado en cada ciclo, ver
-    build_features_as_of) es candidata a boost reactivo
-    (train_mod.compute_fast_boost) SOLO si además está en
+    champion. El boost se aplica siempre que la estación esté en
     `model["boost_validated_by_horizon"]` para ese horizonte — el champion
-    ya la validó con backtest real al entrenar (ver train.run()); una
-    estación recién detectada que el champion vigente nunca vio no se
-    boostea a ciegas, espera al próximo reentrenamiento que la valide."""
+    ya la validó con backtest real al entrenar (ver train.run()), igual
+    que lo evalúa promote.py al comparar candidato vs. champion.
+    `drifted_stations` (recalculado en cada ciclo, ver
+    build_features_as_of) ya NO filtra el boost (bug encontrado
+    2026-10-01): es el detector de PROMEDIO DIARIO, el mismo que se
+    demostró insuficiente para quiebres rápidos dentro de un día (caso
+    03000, ver train.py) — como se recalcula cada 10 min, una estación
+    podía entrar y salir de ese set ciclo a ciclo aunque el champion ya
+    tuviera el boost validado, aplicándolo de forma intermitente en vivo
+    en vez de consistente como en el backtest que lo validó. Brecha real
+    medida: el mismo champion daba 39.27% reconstruido en backtest
+    (promote.champion_accuracy_on, sin este filtro extra) contra 18.8% en
+    las predicciones realmente entregadas (con el filtro). Se sigue
+    calculando y logueando `drifted_stations` como diagnóstico, nunca
+    como gate."""
     lookup = model["_naive_lookup"]
     station_mean = model["_naive_station_mean"]
     # Último recurso para una estación que ni siquiera tiene media histórica
@@ -301,7 +312,7 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
         w_boost = 0.0
         w_gbm_eff = w_gbm
         boost_validated = model.get("boost_validated_by_horizon", {}).get(horizon_min, set())
-        if drifted_stations and sid in drifted_stations and sid in boost_validated:
+        if sid in boost_validated:
             w_boost = train_mod.compute_fast_boost([naive_value], [boost_value], [True], horizon_min)[0]
             # El boost puede comerle espacio a w_gbm, no solo al sobrante —
             # mismo cambio y mismo motivo que train.hybrid_predict (ver ese
@@ -469,7 +480,7 @@ def main():
     # producción una vez (ver feature_cols_by_horizon más arriba).
     model["_naive_lookup"], model["_naive_station_mean"] = weighted_naive_tables(base, "hour", "day_of_week")
 
-    predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"], drifted_stations=drifted_stations)
+    predictions = predict_targets(model, cutoff_row_by_station, cycle["targets"])
 
     try:
         validate_exact_targets(predictions, cycle["targets"])
