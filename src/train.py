@@ -328,29 +328,86 @@ def gbm_candidate_catboost(train_df, test_df, station_categories):
     return model, y_pred
 
 
+def gbm_candidate_mae(train_df, test_df, station_categories):
+    """Tercer candidato — hallazgo del 2026-10-01: el GBM de producción
+    entrena con pérdida Poisson (optimiza la MEDIA esperada), pero el
+    portal califica con WAPE (error absoluto, tipo L1) — eso se minimiza
+    con la MEDIANA, no la media. En un régimen tan volátil, la media se
+    deja arrastrar por los picos extremos; la mediana es más robusta.
+    Validado con backtest real contra la MISMA ventana de 7 días que usa
+    promote.py: ayuda en CASI todas las estaciones (+1 a +3.7 puntos en
+    02300/05000/09122/etc, los 4 horizontes), pero empeora mucho
+    específicamente en 05100 (-7.6 a -15.6) — el patrón INVERSO de
+    CatBoost (que ayuda fuerte justo en 05100). Por eso tampoco reemplaza
+    nada por completo: es un tercer candidato para la selección por
+    estación en run() (ver gbm_model_type_by_station), junto a sklearn-
+    Poisson y CatBoost-Poisson."""
+    X_train = train_df[FEATURE_COLS].copy()
+    X_test = test_df[FEATURE_COLS].copy()
+    X_train["station_id"] = pd.Categorical(X_train["station_id"], categories=station_categories)
+    X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=station_categories)
+
+    models = []
+    for i in range(N_ENSEMBLE):
+        m = HistGradientBoostingRegressor(
+            categorical_features=["station_id"],
+            loss="absolute_error",  # optimiza MAE/mediana en vez de Poisson/media
+            max_iter=2000,
+            learning_rate=0.05,
+            max_depth=8,
+            min_samples_leaf=30,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=20,
+            random_state=42 + i,
+        )
+        m.fit(X_train, train_df["target_demand"])
+        models.append(m)
+
+    model = BaggedGBM(models)
+    y_pred = np.clip(model.predict(X_test), 0, None)
+    return model, y_pred
+
+
+DEFAULT_GBM_TYPE = "sklearn"
+
+
 class PerStationGBM:
     """Modelo híbrido por estación: cada estación usa el tipo de GBM que
-    ganó en SU PROPIA validación (sklearn HistGradientBoostingRegressor o
-    CatBoost) — ver gbm_model_type_by_station en run(). Nunca "todo a
-    CatBoost": el barrido real (2026-10-01) mostró que CatBoost gana fuerte
-    solo en 05100 (y algo en 03000/09000) pero pierde en el resto, así que
-    la selección es por estación, igual que naive-vs-gbm (winner_by_station)
-    y los pesos de mezcla (mix_weights_by_station)."""
+    ganó en SU PROPIA validación — sklearn HistGradientBoostingRegressor
+    (Poisson), CatBoost (Poisson), o sklearn con pérdida MAE (ver
+    gbm_candidate_catboost/gbm_candidate_mae) — ver
+    gbm_model_type_by_station en run(). Nunca "todo a un solo tipo": cada
+    candidato gana fuerte solo en un puñado de estaciones y pierde en el
+    resto (CatBoost: 05100/03000/09000; MAE: casi todas MENOS 05100), así
+    que la selección es por estación, igual que naive-vs-gbm
+    (winner_by_station) y los pesos de mezcla (mix_weights_by_station).
 
-    def __init__(self, sklearn_model, catboost_model, station_type_map):
-        self.sklearn_model = sklearn_model
-        self.catboost_model = catboost_model
-        self.station_type_map = station_type_map  # station_id (str) -> "sklearn"|"catboost"
+    `models_by_type` es un dict {"sklearn": modelo, "catboost": modelo,
+    "sklearn_mae": modelo, ...} — generaliza a cualquier número de
+    candidatos sin tocar esta clase de nuevo. Backward-compat: un
+    champion viejo (2026-10-01, antes de MAE) serializado con los
+    atributos `sklearn_model`/`catboost_model` en vez de
+    `models_by_type` se sigue sirviendo bien — ver predict()."""
+
+    def __init__(self, models_by_type, station_type_map):
+        self.models_by_type = models_by_type
+        self.station_type_map = station_type_map  # station_id (str) -> nombre del tipo
 
     def predict(self, X):
         X = X.reset_index(drop=True)
         station_ids = X["station_id"].astype(str)
-        is_catboost = station_ids.map(lambda sid: self.station_type_map.get(sid) == "catboost").to_numpy()
+        models_by_type = getattr(self, "models_by_type", None)
+        if models_by_type is None:
+            # Champion de antes de models_by_type (solo sklearn/catboost).
+            models_by_type = {"sklearn": self.sklearn_model, "catboost": self.catboost_model}
+        type_map = self.station_type_map
+        types = station_ids.map(lambda sid: type_map.get(sid, DEFAULT_GBM_TYPE))
         preds = np.empty(len(X), dtype=float)
-        if (~is_catboost).any():
-            preds[~is_catboost] = self.sklearn_model.predict(X.loc[~is_catboost])
-        if is_catboost.any():
-            preds[is_catboost] = self.catboost_model.predict(X.loc[is_catboost])
+        for type_name, model in models_by_type.items():
+            mask = (types == type_name).to_numpy()
+            if mask.any():
+                preds[mask] = model.predict(X.loc[mask])
         return preds
 
 
@@ -711,21 +768,33 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         val_fast_pred = naive_fast_baseline(val_df)
         _, val_gbm_pred = gbm_candidate(fit_train_df, val_df, station_categories)
 
-        # Selección por estación sklearn-vs-CatBoost (2026-10-01): se decide
-        # ACÁ, en validación, nunca asumido — mismo patrón que
+        # Selección por estación entre 3 candidatos de GBM (2026-10-01): se
+        # decide ACÁ, en validación, nunca asumido — mismo patrón que
         # winner_by_station (gbm-vs-naive) más abajo. CatBoost solo gana en
-        # un puñado de estaciones (05100 sobre todo); el resto se queda con
-        # el GBM de sklearn. Ver gbm_candidate_catboost/PerStationGBM.
+        # un puñado de estaciones (05100 sobre todo); sklearn-MAE (pérdida
+        # absoluta, alineada con WAPE en vez de Poisson) gana en CASI todas
+        # MENOS 05100 (donde pierde fuerte, -7.6 a -15.6 — media vs mediana
+        # en una estación de swings extremos). Ver
+        # gbm_candidate_catboost/gbm_candidate_mae/PerStationGBM.
         _, val_catboost_pred = gbm_candidate_catboost(fit_train_df, val_df, station_categories)
-        val_gbm_acc_sklearn = evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"]
-        val_gbm_acc_catboost = evaluate_by_station(val_df, val_catboost_pred).set_index("station_id")["accuracy"]
+        _, val_mae_pred = gbm_candidate_mae(fit_train_df, val_df, station_categories)
+        val_gbm_acc_by_type = {
+            "sklearn": evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"],
+            "catboost": evaluate_by_station(val_df, val_catboost_pred).set_index("station_id")["accuracy"],
+            "sklearn_mae": evaluate_by_station(val_df, val_mae_pred).set_index("station_id")["accuracy"],
+        }
         gbm_model_type_by_station = {
-            sid: ("catboost" if val_gbm_acc_catboost.get(sid, -1) > val_gbm_acc_sklearn.get(sid, -1) else "sklearn")
+            sid: max(val_gbm_acc_by_type, key=lambda t: val_gbm_acc_by_type[t].get(sid, -1))
             for sid in station_categories
         }
+        val_preds_by_type = {"sklearn": val_gbm_pred, "catboost": val_catboost_pred, "sklearn_mae": val_mae_pred}
         val_station_ids = val_df["station_id"].astype(str).to_numpy()
-        val_type_arr = np.array([gbm_model_type_by_station.get(sid, "sklearn") for sid in val_station_ids])
-        val_gbm_pred = np.where(val_type_arr == "catboost", val_catboost_pred, val_gbm_pred)
+        val_type_arr = np.array([gbm_model_type_by_station.get(sid, DEFAULT_GBM_TYPE) for sid in val_station_ids])
+        val_gbm_pred = np.select(
+            [val_type_arr == t for t in val_preds_by_type],
+            [val_preds_by_type[t] for t in val_preds_by_type],
+            default=val_gbm_pred,
+        )
 
         val_naive_acc = evaluate_by_station(val_df, val_naive_pred).set_index("station_id")["accuracy"]
         val_gbm_acc = evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"]
@@ -746,15 +815,23 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
 
         model_sklearn, gbm_pred_sklearn = gbm_candidate(full_train_df, test_df, station_categories)
         model_catboost, gbm_pred_catboost = gbm_candidate_catboost(full_train_df, test_df, station_categories)
-        model = PerStationGBM(model_sklearn, model_catboost, gbm_model_type_by_station)
+        model_mae, gbm_pred_mae = gbm_candidate_mae(full_train_df, test_df, station_categories)
+        models_by_type = {"sklearn": model_sklearn, "catboost": model_catboost, "sklearn_mae": model_mae}
+        model = PerStationGBM(models_by_type, gbm_model_type_by_station)
+        test_preds_by_type = {"sklearn": gbm_pred_sklearn, "catboost": gbm_pred_catboost, "sklearn_mae": gbm_pred_mae}
         test_station_ids = test_df["station_id"].astype(str).to_numpy()
-        test_type_arr = np.array([gbm_model_type_by_station.get(sid, "sklearn") for sid in test_station_ids])
-        gbm_pred = np.where(test_type_arr == "catboost", gbm_pred_catboost, gbm_pred_sklearn)
+        test_type_arr = np.array([gbm_model_type_by_station.get(sid, DEFAULT_GBM_TYPE) for sid in test_station_ids])
+        gbm_pred = np.select(
+            [test_type_arr == t for t in test_preds_by_type],
+            [test_preds_by_type[t] for t in test_preds_by_type],
+            default=gbm_pred_sklearn,
+        )
         gbm_by_station = evaluate_by_station(test_df, gbm_pred)
         gbm_overall_wape, gbm_overall_acc = wape_accuracy(test_df["target_demand"], gbm_pred)
-        if any(v == "catboost" for v in gbm_model_type_by_station.values()):
-            print(f"  -> CatBoost elegido (sobre sklearn GBM) en estaciones: "
-                  f"{[sid for sid, t in gbm_model_type_by_station.items() if t == 'catboost']}")
+        for type_name in ("catboost", "sklearn_mae"):
+            chosen = [sid for sid, t in gbm_model_type_by_station.items() if t == type_name]
+            if chosen:
+                print(f"  -> {type_name} elegido (sobre sklearn GBM Poisson) en estaciones: {chosen}")
 
         # Autovalidación del boost (2026-09-30): antes de confiar en
         # `drifted_stations` a ciegas, se mide en ESTE MISMO test si el
