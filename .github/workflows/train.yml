@@ -12,7 +12,13 @@ concurrency:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
+    # Subido de 20 a 35 (2026-10-01): el tercer candidato de GBM
+    # (sklearn-MAE, ver gbm_candidate_mae en train.py) agrega ~50% más
+    # entrenamientos por horizonte (3 tipos x2 evaluaciones en vez de 2) —
+    # una corrida real tras agregarlo tardó más de 20 min y arriesgaba que
+    # GitHub Actions la matara a mitad de camino, perdiendo el trabajo
+    # completo (y el drift sigue sin detenerse mientras tanto).
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
