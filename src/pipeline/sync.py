@@ -31,10 +31,10 @@ import os
 from datetime import datetime, timezone
 
 import pandas as pd
-import requests
 
 from src import supabase_client as sb
 from src.features import climatological_context, estimate_context_row
+from src.http_retry import request_with_retry
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 SOURCE = "observations_stream"
@@ -85,7 +85,7 @@ def sync_observations_from_saved_cursor():
         params = {"limit": 5000}
         if cursor:
             params["cursor"] = cursor
-        r = requests.get(f"{API_BASE}/v1/stream/observations", params=params, timeout=30)
+        r = request_with_retry("GET", f"{API_BASE}/v1/stream/observations", params=params, timeout=30)
         r.raise_for_status()
         body = r.json()
         rows = body.get("data", [])

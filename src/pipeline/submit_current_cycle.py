@@ -29,11 +29,11 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-import requests
 
 from src import supabase_client as sb
 from src import train as train_mod
 from src.features import build_feature_frame, climatological_context, estimate_context_row, target_time_features
+from src.http_retry import request_with_retry
 from src.pipeline.sync import sync_observations_from_saved_cursor
 from src.train import FEATURE_COLS, weighted_naive_tables
 
@@ -56,7 +56,7 @@ def get_current_cycle():
     """La API es la autoridad: el 404 no_open_cycle (o un estado que no
     sea "open") es un resultado normal, no un error — el workflow debe
     terminar en verde sin intentar nada más."""
-    r = requests.get(f"{API_BASE}/v1/forecast-cycles/current", timeout=15)
+    r = request_with_retry("GET", f"{API_BASE}/v1/forecast-cycles/current", timeout=15)
     if r.status_code == 404:
         return None
     r.raise_for_status()
@@ -363,8 +363,13 @@ def post_submission(cycle, model, predictions, git_commit):
         },
         "predictions": [{"station_id": p["station_id"], "target_at": p["target_at"], "value": p["value"]} for p in predictions],
     }
+    # Idempotency-Key ya hace este POST seguro de reintentar: si el primer
+    # intento sí llegó al servidor pero la respuesta se perdió en el
+    # camino (timeout de lectura, no de conexión), el servidor reconoce
+    # la misma key y no duplica la entrega.
     idem_key = stable_key(cycle["cycle_id"], model_version)
-    r = requests.post(
+    r = request_with_retry(
+        "POST",
         f"{API_BASE}/v1/submissions",
         headers={
             "Authorization": f"Bearer {PULSO_API_KEY}",
