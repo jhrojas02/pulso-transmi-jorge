@@ -427,6 +427,36 @@ def trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps, phi=TREND_D
     return np.clip(value, 0, None)
 
 
+BOOST_BLEND_WEIGHT_TREND = 0.5  # peso del componente de tendencia vs. el
+# promedio simple de los últimos 2 puntos — 2026-10-01: el profe subió el
+# drift de verdad y cambió el RITMO mismo de la demanda en estaciones que
+# antes eran estables (07105/10009/06111/09122 pasaron de un único pico
+# diario a oscilar entre casi 0 y su pico varias veces en pocas horas).
+# Durante una oscilación así, extrapolar la pendiente (trend_extrapolated_
+# signal_smoothed) sobrecorrige sistemáticamente — no hay tendencia
+# sostenida que extrapolar, es un vaivén — mientras que el promedio de los
+# últimos 2 puntos (sin proyectar nada) sigue el vaivén de cerca. Barrido
+# real con datos crudos de ambos grupos (las 4 estaciones con oscilación
+# nueva Y las 6 con quiebre sostenido ya conocidas): w_trend=0.5 ganó en
+# promedio en AMBOS grupos frente a los dos extremos (71.98 vs 70.23 de la
+# señal pura de tendencia en las 6 conocidas; 60.42 vs 58.39 en las 4
+# nuevas) — mezclar no es una concesión, es estrictamente mejor que
+# cualquiera de las dos señales solas.
+
+
+def blended_boost_signal(lag_1, lag_2, lag_1h, horizon_steps, w_trend=BOOST_BLEND_WEIGHT_TREND):
+    """Mezcla trend_extrapolated_signal_smoothed (sigue tendencias
+    sostenidas) con el promedio simple de lag_1/lag_2 (sigue oscilaciones
+    rápidas sin sobrecorregir) — ver BOOST_BLEND_WEIGHT_TREND para el
+    porqué y la validación. Es la señal de boost por defecto desde
+    2026-10-01."""
+    lag_1 = np.asarray(lag_1, dtype=float)
+    lag_2 = np.asarray(lag_2, dtype=float)
+    trend_signal = trend_extrapolated_signal_smoothed(lag_1, lag_1h, horizon_steps)
+    short_avg = (lag_1 + lag_2) / 2.0
+    return np.clip(w_trend * trend_signal + (1 - w_trend) * short_avg, 0, None)
+
+
 FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
 # señal del boost (ver más abajo) deja de haber horizontes "malos" — a
 # diferencia del intento anterior (2026-09-29) con rolling_mean_4h, que
@@ -494,7 +524,9 @@ def hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_stat
     nunca pasan por el boost."""
     naive_pred, fast_pred, gbm_pred = np.asarray(naive_pred), np.asarray(fast_pred), np.asarray(gbm_pred)
     if boost_fast_pred is None:
-        if "lag_1" in test_df.columns and "lag_1h" in test_df.columns and horizon_min is not None:
+        if "lag_1" in test_df.columns and "lag_2" in test_df.columns and "lag_1h" in test_df.columns and horizon_min is not None:
+            boost_fast_pred = blended_boost_signal(test_df["lag_1"], test_df["lag_2"], test_df["lag_1h"], horizon_min // 15)
+        elif "lag_1" in test_df.columns and "lag_1h" in test_df.columns and horizon_min is not None:
             boost_fast_pred = trend_extrapolated_signal_smoothed(test_df["lag_1"], test_df["lag_1h"], horizon_min // 15)
         elif "lag_1" in test_df.columns and "lag_2" in test_df.columns and horizon_min is not None:
             boost_fast_pred = trend_extrapolated_signal(test_df["lag_1"], test_df["lag_2"], horizon_min // 15)

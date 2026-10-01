@@ -273,13 +273,18 @@ def predict_targets(model, cutoff_row_by_station, targets, drifted_stations=None
         fast_raw = combined.get("rolling_mean_4h")
         fast_value = float(fast_raw) if pd.notna(fast_raw) else naive_value
         boost_raw = combined.get("lag_1")
+        lag_2_raw = combined.get("lag_2")
         lag_1h_raw = combined.get("lag_1h")
-        if pd.notna(boost_raw) and pd.notna(lag_1h_raw):
+        if pd.notna(boost_raw) and pd.notna(lag_2_raw) and pd.notna(lag_1h_raw):
             # Misma señal que train.hybrid_predict (nunca duplicar la fórmula
-            # a mano en los dos lados — ver docstring de
-            # trend_extrapolated_signal_smoothed): extrapola la pendiente
-            # SUAVIZADA sobre 1h (4 pasos) horizon_steps pasos adelante, en
-            # vez de usar el par ruidoso lag_1-lag_2 de un solo paso.
+            # a mano en los dos lados — ver docstring de blended_boost_signal):
+            # mezcla la extrapolación de tendencia SUAVIZADA con el promedio
+            # simple de los últimos 2 puntos, para no sobrecorregir cuando el
+            # drift es una oscilación rápida en vez de una tendencia sostenida.
+            boost_value = float(train_mod.blended_boost_signal(
+                [boost_raw], [lag_2_raw], [lag_1h_raw], horizon_min // 15,
+            )[0])
+        elif pd.notna(boost_raw) and pd.notna(lag_1h_raw):
             boost_value = float(train_mod.trend_extrapolated_signal_smoothed(
                 [boost_raw], [lag_1h_raw], horizon_min // 15,
             )[0])
