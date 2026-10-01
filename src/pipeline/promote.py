@@ -74,6 +74,32 @@ MAX_STATION_REGRESSION = 4.0
 # es reciente) queda bloqueado igual, sin importar cuánto mejore el resto.
 CHAMPION_FLOOR_ACCURACY_STATION = 60.0
 
+RECENT_WINDOW_HOURS = 36
+# Hallazgo 2026-10-01: durante una escalada de drift MUY rápida y
+# reciente (profesor subió el drift a las 12 estaciones en cuestión de
+# horas), el accuracy REAL de las últimas 3h (calculado directo contra
+# `prediccion`/`observacion`) estaba en 9-46% mientras el backtest de
+# TEST_DAYS=7 seguía reportando 68-79% para los mismos modelos — el
+# promedio de 7 días diluye unas pocas horas catastróficas entre 6+ días
+# de datos "normales", así que el delta candidato-vs-champion del gate
+# nunca refleja qué tan mal/bien le va a cada uno AHORA. Resultado medido:
+# +60min llevaba 3.5h sin promover pese a reentrenar cada ~30min —
+# 4 corridas seguidas con delta de 7 días oscilando justo alrededor de
+# cero (-0.11, +0.01, +0.08, +0.08), nunca reflejando que el champion
+# vigente ya rendía 18.8% en vivo.
+RECENT_WINDOW_WEIGHT = 0.5
+# Se pondera a la par con la ventana completa de 7 días — nunca a solas
+# (eso sí repetiría el error de la ponderación por recencia del GBM, que
+# se revirtió en producción por sobreajustarse a una ventana angosta).
+# Combinar 50/50 dos señales independientes (7 días completos + últimas
+# 36h) es más robusto que reemplazar una por otra: si están de acuerdo,
+# el blend no cambia nada; si no, el blend mueve la decisión hacia dónde
+# apunta la evidencia más fresca sin ignorar la estabilidad de fondo.
+RECENT_MIN_ROWS = 400
+# Mínimo de filas (sumando las 12 estaciones) en la ventana de 36h para
+# confiar en su delta — por debajo de esto, muy pocos datos para que no
+# sea solo ruido; se cae de vuelta al delta de 7 días solo.
+
 
 def load_full_history():
     observations = sb.select_all("observacion", select="station_id,observed_at,demand", order="observed_at.asc,station_id.asc")
@@ -155,6 +181,13 @@ def champion_accuracy_on(champ_bundle, train_df, test_df, drifted_stations=None,
     return overall, dict(zip(by_station["station_id"], by_station["accuracy"]))
 
 
+def recent_window(test_df, hours=RECENT_WINDOW_HOURS):
+    """Recorta `test_df` (la ventana de 7 días completa) a solo las
+    últimas `hours` horas — ver RECENT_WINDOW_HOURS para el porqué."""
+    cutoff = test_df["observed_at"].max() - pd.Timedelta(hours=hours)
+    return test_df[test_df["observed_at"] >= cutoff]
+
+
 def register_candidate(horizon_min, summary_row, code_commit, version, cutoff_inicio, cutoff_fin):
     model_id = f"model_{date.today().isoformat()}_hybrid_h{horizon_min}_{version}"
     now = datetime.now(timezone.utc).isoformat()
@@ -212,7 +245,8 @@ def upload_artifact(horizon_min, model_id):
     sb.storage_upload("models", f"{model_id}/gbm.joblib", path.read_bytes())
 
 
-def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ_accuracy_mean, champ_by_station):
+def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ_accuracy_mean, champ_by_station,
+                        candidate_recent_mean=None, champ_recent_mean=None, recent_n_rows=0):
     candidate_by_station = {r["station_id"]: r["accuracy"] for r in candidate_summary["hybrid_by_station"]}
     candidate_mean = candidate_summary["hybrid_accuracy_mean_stations"]
 
@@ -221,6 +255,16 @@ def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ
         reason = "no había champion vigente para este horizonte"
     else:
         delta = candidate_mean - champ_accuracy_mean
+        # Delta ponderado por recencia (ver RECENT_WINDOW_WEIGHT): el de 7
+        # días solo se usa tal cual si no hay suficientes filas recientes
+        # para confiar en ese pedazo (RECENT_MIN_ROWS) o no hay champion
+        # vigente con el que comparar esa ventana.
+        recent_delta = None
+        if recent_n_rows >= RECENT_MIN_ROWS and candidate_recent_mean is not None and champ_recent_mean is not None:
+            recent_delta = candidate_recent_mean - champ_recent_mean
+            blended_delta = (1 - RECENT_WINDOW_WEIGHT) * delta + RECENT_WINDOW_WEIGHT * recent_delta
+        else:
+            blended_delta = delta
         # Solo cuentan como "regresión bloqueante" las estaciones donde el
         # champion vigente todavía anda razonablemente bien (ver
         # CHAMPION_FLOOR_ACCURACY_STATION) — una estación ya rota no puede
@@ -232,9 +276,15 @@ def decide_and_promote(horizon_min, candidate_model_id, candidate_summary, champ
         }
         worst_station, worst_regression = min(regressions.items(), key=lambda kv: kv[1], default=(None, 0.0))
         min_improvement = MIN_IMPROVEMENT_BY_HORIZON[horizon_min]
-        should_promote = delta >= min_improvement and worst_regression >= -MAX_STATION_REGRESSION
+        should_promote = blended_delta >= min_improvement and worst_regression >= -MAX_STATION_REGRESSION
+        recent_str = (
+            f", últimas {RECENT_WINDOW_HOURS}h: candidato={candidate_recent_mean:.2f} champion={champ_recent_mean:.2f} "
+            f"(delta={recent_delta:+.2f}, n={recent_n_rows}) -> blend={blended_delta:+.2f}"
+            if recent_delta is not None
+            else f", sin ventana reciente confiable (n={recent_n_rows} < {RECENT_MIN_ROWS})"
+        )
         reason = (
-            f"delta promedio={delta:+.2f} (umbral +{min_improvement}), "
+            f"delta 7d={delta:+.2f} (umbral +{min_improvement}){recent_str}, "
             f"peor caída por estación={worst_regression:+.2f} en {worst_station} "
             f"(tolerancia -{MAX_STATION_REGRESSION}, ignorando estaciones con champion ya < {CHAMPION_FLOOR_ACCURACY_STATION})"
         )
@@ -283,7 +333,34 @@ def main():
             horizon_min=horizon_min,
         )
 
-        promoted, reason = decide_and_promote(horizon_min, model_id, row, champ_accuracy_mean, champ_by_station)
+        # Ventana reciente (ver RECENT_WINDOW_HOURS/RECENT_WINDOW_WEIGHT):
+        # mismo bundle de evaluación que arriba, pero recortado a las
+        # últimas horas — nunca reemplaza el delta de 7 días, se combina.
+        candidate_recent_mean = champ_recent_mean = None
+        recent_df = recent_window(row["_test_df"])
+        recent_n_rows = len(recent_df)
+        if champ_bundle is not None and recent_n_rows >= RECENT_MIN_ROWS:
+            cand_dump = joblib.load(train_mod.ARTIFACTS_DIR / f"gbm_h{horizon_min}.joblib")
+            candidate_bundle = {
+                "model": cand_dump["model"],
+                "station_categories": cand_dump["station_categories"],
+                "feature_cols": train_mod.FEATURE_COLS,
+                "mix_weights_by_station": row["mix_weights_by_station"],
+                "boost_validated_stations": row["boost_validated_stations"],
+            }
+            candidate_recent_mean, _ = champion_accuracy_on(
+                candidate_bundle, row["_full_train_df"], recent_df,
+                drifted_stations=row["boost_validated_stations"], horizon_min=horizon_min,
+            )
+            champ_recent_mean, _ = champion_accuracy_on(
+                champ_bundle, row["_full_train_df"], recent_df,
+                drifted_stations=champ_bundle["boost_validated_stations"], horizon_min=horizon_min,
+            )
+
+        promoted, reason = decide_and_promote(
+            horizon_min, model_id, row, champ_accuracy_mean, champ_by_station,
+            candidate_recent_mean=candidate_recent_mean, champ_recent_mean=champ_recent_mean, recent_n_rows=recent_n_rows,
+        )
         decisions.append({"horizon_min": horizon_min, "model_id": model_id, "accuracy": agg_acc, "promoted": promoted, "reason": reason})
 
     run_id = f"run_{uuid.uuid4().hex[:16]}"
