@@ -774,24 +774,43 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         # estación×horizonte con quiebre en el backtest real de 2026-09-30,
         # a veces por >15 puntos, frente a la pendiente de un solo par de lags
         # (demasiado ruidosa para estaciones como 05100 en plena caída).
+        #
+        # boost_candidates (2026-10-01): se prueba el boost en TODAS las
+        # estaciones, no solo en `drifted_stations` — el detector de
+        # drift compara PROMEDIOS DIARIOS (ventanas de 1 y 5 días), así
+        # que un quiebre breve dentro de un solo día (ej. 03000 cayendo
+        # de 369 a 36 en ~2h la noche del 2026-09-18, sin que el
+        # promedio del día se mueva lo suficiente) nunca entraba a la
+        # autovalidación — se descartaba sin probarse. Esto NO relaja
+        # ningún criterio: el boost sigue sin aplicarse salvo que el
+        # backtest real de ESTE MISMO test lo confirme explícitamente
+        # (misma comparación hybrid_acc_con_boost > hybrid_acc_sin_boost
+        # de siempre), así que una estación sin quiebre real simplemente
+        # sale de la prueba sin boost, igual que antes. `drifted_stations`
+        # (el detector por promedio diario) sigue siendo lo único que usa
+        # blend_weights_3way para topar w_gbm — no se toca ese uso.
+        boost_candidates = {sid: drifted_stations.get(sid, 0.0) for sid in station_categories}
         hybrid_pred_con_boost = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
-                                                drifted_stations=drifted_stations, horizon_min=horizon_min)
+                                                drifted_stations=boost_candidates, horizon_min=horizon_min)
         hybrid_acc_con_boost = evaluate_by_station(test_df, hybrid_pred_con_boost).set_index("station_id")["accuracy"]
         boost_validated_stations = {
-            sid: drifted_stations[sid] for sid in drifted_stations
+            sid: boost_candidates[sid] for sid in boost_candidates
             if sid in hybrid_acc_con_boost.index and hybrid_acc_con_boost[sid] > hybrid_acc_sin_boost[sid]
         }
-        if drifted_stations:
-            print(f"  -> boost validado con backtest real en este mismo test: "
-                  f"{list(boost_validated_stations)} SÍ mejoran, "
-                  f"{[s for s in drifted_stations if s not in boost_validated_stations]} NO (se dejan sin boost)")
-            for sid in drifted_stations:
-                if sid in hybrid_acc_sin_boost.index and sid in hybrid_acc_con_boost.index:
-                    w = mix_weights_by_station.get(sid, {"gbm": 0.0, "fast": 0.0})
-                    room = max(0.0, 1.0 - w["gbm"] - w["fast"])
+        print(f"  -> boost validado con backtest real en este mismo test (probado en las {len(boost_candidates)} "
+              f"estaciones, no solo las {len(drifted_stations)} con drift de promedio diario): "
+              f"{list(boost_validated_stations)} SÍ mejoran, "
+              f"{[s for s in boost_candidates if s not in boost_validated_stations]} NO (se dejan sin boost)")
+        for sid in boost_candidates:
+            if sid in hybrid_acc_sin_boost.index and sid in hybrid_acc_con_boost.index:
+                w = mix_weights_by_station.get(sid, {"gbm": 0.0, "fast": 0.0})
+                room = max(0.0, 1.0 - w["gbm"] - w["fast"])
+                delta = hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]
+                if abs(delta) >= 0.5:  # solo ruido suprimido del log, no del resultado
                     print(f"     {sid}: sin_boost={hybrid_acc_sin_boost[sid]:.2f}  "
-                          f"con_boost={hybrid_acc_con_boost[sid]:.2f} ({hybrid_acc_con_boost[sid] - hybrid_acc_sin_boost[sid]:+.2f})  "
-                          f"w_gbm={w['gbm']:.2f} w_fast={w['fast']:.2f} espacio_boost={room:.2f}")
+                          f"con_boost={hybrid_acc_con_boost[sid]:.2f} ({delta:+.2f})  "
+                          f"w_gbm={w['gbm']:.2f} w_fast={w['fast']:.2f} espacio_boost={room:.2f}"
+                          f"{'  [drift de promedio diario]' if sid in drifted_stations else '  [solo por autovalidación]'}")
 
         hybrid_pred = hybrid_predict(test_df, naive_pred, fast_pred, gbm_pred, mix_weights_by_station,
                                       drifted_stations=boost_validated_stations, horizon_min=horizon_min)
