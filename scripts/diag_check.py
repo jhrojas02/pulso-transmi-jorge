@@ -52,6 +52,14 @@ for name, gap in gaps[:5]:
     print("cumulative:", jsonlib.dumps(cum_by_name[name], indent=2))
     print("rolling_24h:", jsonlib.dumps(roll_by_name[name], indent=2))
 
+print("\n=== fila completa de buen cumulative + buen gap (coverage en rolling_24h) ===")
+for name in ["María Jimena Castaño Albarracín", "Isaias Cespedes Novoa",
+             "Maria Isabell Guzman Faneyte", "Jorge Horacio Rojas Criollo"]:
+    if name in cum_by_name and name in roll_by_name:
+        print(f"-- {name} --")
+        print("cumulative:", jsonlib.dumps(cum_by_name[name], indent=2))
+        print("rolling_24h:", jsonlib.dumps(roll_by_name[name], indent=2))
+
 print("\n=== comparacion cumulative vs rolling_24h (gap = rolling - cumulative) ===")
 names = set(boards["cumulative"]) | set(boards["rolling_24h"])
 rows = []
