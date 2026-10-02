@@ -118,14 +118,21 @@ def storage_upload(bucket, path, data: bytes, content_type="application/octet-st
     _require_config()
     headers = _headers({"Content-Type": content_type, "x-upsert": "true"})
     r = _session.post(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=headers, data=data, timeout=60)
-    r.raise_for_status()
+    # El body de error de Storage (ej. tamaño de archivo excedido, bucket mal
+    # configurado) no aparece en raise_for_status() por defecto — solo dice
+    # "400 Bad Request" sin motivo, lo que hizo perder una corrida entera de
+    # ~23min sin poder diagnosticar la causa real (2026-10-02). Se adjunta
+    # el body a la excepción para que el traceback diga qué pasó de verdad.
+    if not r.ok:
+        raise RuntimeError(f"storage_upload {bucket}/{path}: HTTP {r.status_code} — {r.text[:1000]}")
     return r.json()
 
 
 def storage_download(bucket, path):
     _require_config()
     r = _session.get(f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}", headers=_headers(), timeout=60)
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"storage_download {bucket}/{path}: HTTP {r.status_code} — {r.text[:1000]}")
     return r.content
 
 
