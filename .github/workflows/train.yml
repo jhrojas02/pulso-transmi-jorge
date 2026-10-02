@@ -12,13 +12,17 @@ concurrency:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
-    # Subido de 20 a 35 (2026-10-01): el tercer candidato de GBM
-    # (sklearn-MAE, ver gbm_candidate_mae en train.py) agrega ~50% más
-    # entrenamientos por horizonte (3 tipos x2 evaluaciones en vez de 2) —
-    # una corrida real tras agregarlo tardó más de 20 min y arriesgaba que
-    # GitHub Actions la matara a mitad de camino, perdiendo el trabajo
-    # completo (y el drift sigue sin detenerse mientras tanto).
+    timeout-minutes: 60
+    # Subido de 35 a 60 (2026-10-02): train.py ahora reentrena el modelo
+    # final UNA VEZ MÁS antes de guardarlo (con TODOS los datos, no solo
+    # full_train_df — ver docstring del "Reentreno final para DESPLIEGUE"
+    # en run()), para que el artefacto desplegado sí vea la semana más
+    # reciente en vez de dejarla siempre afuera como test. Esto
+    # prácticamente DUPLICA el entrenamiento del Paso 2 (los 4 candidatos
+    # de GBM se entrenan 2 veces por horizonte en vez de 1) — la corrida
+    # anterior con 4 candidatos (sin este reentreno) tardaba ~10-13 min,
+    # así que 60 min deja margen generoso incluso si el doble de
+    # entrenamiento la acerca a 25-30 min reales.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

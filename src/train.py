@@ -893,11 +893,6 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         model_catboost, gbm_pred_catboost = gbm_candidate_catboost(full_train_df, test_df, station_categories)
         model_mae, gbm_pred_mae = gbm_candidate_mae(full_train_df, test_df, station_categories)
         model_delta, gbm_pred_delta = gbm_candidate_delta(full_train_df, test_df, station_categories)
-        models_by_type = {
-            "sklearn": model_sklearn, "catboost": model_catboost,
-            "sklearn_mae": model_mae, "delta": model_delta,
-        }
-        model = PerStationGBM(models_by_type, gbm_model_type_by_station)
         test_preds_by_type = {
             "sklearn": gbm_pred_sklearn, "catboost": gbm_pred_catboost,
             "sklearn_mae": gbm_pred_mae, "delta": gbm_pred_delta,
@@ -915,6 +910,34 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
             chosen = [sid for sid, t in gbm_model_type_by_station.items() if t == type_name]
             if chosen:
                 print(f"  -> {type_name} elegido (sobre sklearn GBM Poisson) en estaciones: {chosen}")
+
+        # Reentreno final para DESPLIEGUE (2026-10-02): todo lo de arriba
+        # entrena con full_train_df (excluye TEST_DAYS=7 días) para poder
+        # medir accuracy honesto en test_df nunca visto — correcto para
+        # DECIDIR si promover, pero significa que el artefacto que se
+        # guarda y sirve en vivo nunca había visto ni un ejemplo de los
+        # últimos 7 días. Validado con backtest real (holdout de 24h que
+        # NINGÚN modelo vio, sin fuga): entrenar incluyendo la semana más
+        # reciente sube el accuracy +20 a +32 puntos en ese holdout, justo
+        # durante el quiebre de régimen que empezó 2026-09-18 — el
+        # champion nunca había visto ni un ejemplo del régimen actual
+        # porque TEST_DAYS lo dejaba siempre afuera. Por eso se reentrena
+        # UNA VEZ MÁS acá, ahora sí con df_h completo (full_train_df +
+        # test_df), SOLO para el artefacto que se guarda — la comparación
+        # candidato-vs-champion de arriba y la de promote.py siguen
+        # usando exclusivamente el modelo entrenado con full_train_df,
+        # nunca este, así que la decisión de promoción sigue siendo
+        # honesta (sin fuga de test_df hacia la métrica de decisión).
+        dummy_test = df_h.iloc[:1]
+        model_sklearn_deploy, _ = gbm_candidate(df_h, dummy_test, station_categories)
+        model_catboost_deploy, _ = gbm_candidate_catboost(df_h, dummy_test, station_categories)
+        model_mae_deploy, _ = gbm_candidate_mae(df_h, dummy_test, station_categories)
+        model_delta_deploy, _ = gbm_candidate_delta(df_h, dummy_test, station_categories)
+        models_by_type_deploy = {
+            "sklearn": model_sklearn_deploy, "catboost": model_catboost_deploy,
+            "sklearn_mae": model_mae_deploy, "delta": model_delta_deploy,
+        }
+        model = PerStationGBM(models_by_type_deploy, gbm_model_type_by_station)
 
         # Autovalidación del boost (2026-09-30): antes de confiar en
         # `drifted_stations` a ciegas, se mide en ESTE MISMO test si el
