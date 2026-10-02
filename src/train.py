@@ -369,6 +369,66 @@ def gbm_candidate_mae(train_df, test_df, station_categories):
     return model, y_pred
 
 
+class DeltaGBM:
+    """Envuelve un BaggedGBM entrenado sobre el DELTA (target_demand -
+    lag_1) en vez del nivel absoluto — predict(X) reconstruye el nivel
+    (lag_1 + delta_predicho, clipeado a 0) para tener la MISMA interfaz
+    que los demás candidatos (sklearn/catboost/sklearn_mae), así
+    PerStationGBM los mezcla sin saber que este predice distinto. `X`
+    siempre trae `lag_1` porque ya es parte de FEATURE_COLS."""
+
+    def __init__(self, bagged_model):
+        self.bagged_model = bagged_model
+
+    def predict(self, X):
+        delta_pred = self.bagged_model.predict(X)
+        return np.clip(X["lag_1"].to_numpy(dtype=float) + delta_pred, 0, None)
+
+
+def gbm_candidate_delta(train_df, test_df, station_categories):
+    """Cuarto candidato — hallazgo del 2026-10-02: con saltos de demanda
+    de 2-4x en un solo ciclo (ver investigación de accuracy real en
+    producción, ~37-41% vs. 65-79% de backtest), el GBM tiene que
+    "recordar" el nivel absoluto completo de cada estación Y aprender la
+    dinámica del salto al mismo tiempo. Reentrenar sobre el DELTA
+    (target_demand - lag_1) en vez del nivel deja que lag_1 cargue la
+    magnitud base (ya disponible gratis, sin que el modelo tenga que
+    aprenderla) y el GBM se concentra solo en la parte difícil: cuánto
+    cambia. Validado con backtest real sobre la MISMA ventana de 7 días
+    que usa promote.py, con datos frescos hasta 2026-09-19 19:00: gana en
+    los 4 horizontes (+8.1 en +15min, +5.6 en +30min, +3.0 en +45min,
+    +0.5 en +60min), con las mayores ganancias justo en las estaciones de
+    ráfaga (02300/05000/05100: +10 a +16 puntos en +15min). Por eso se
+    suma como candidato más a la selección por estación (ver
+    gbm_model_type_by_station), nunca reemplaza al resto."""
+    X_train = train_df[FEATURE_COLS].copy()
+    X_test = test_df[FEATURE_COLS].copy()
+    X_train["station_id"] = pd.Categorical(X_train["station_id"], categories=station_categories)
+    X_test["station_id"] = pd.Categorical(X_test["station_id"], categories=station_categories)
+    delta_train = train_df["target_demand"] - train_df["lag_1"]
+
+    models = []
+    for i in range(N_ENSEMBLE):
+        m = HistGradientBoostingRegressor(
+            categorical_features=["station_id"],
+            loss="squared_error",  # el delta puede ser negativo, Poisson no aplica aquí
+            max_iter=2000,
+            learning_rate=0.05,
+            max_depth=8,
+            min_samples_leaf=30,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=20,
+            random_state=42 + i,
+        )
+        m.fit(X_train, delta_train)
+        models.append(m)
+
+    model = DeltaGBM(BaggedGBM(models))
+    y_pred = model.predict(X_test)
+    return model, y_pred
+
+
 DEFAULT_GBM_TYPE = "sklearn"
 
 
@@ -789,16 +849,21 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         # gbm_candidate_catboost/gbm_candidate_mae/PerStationGBM.
         _, val_catboost_pred = gbm_candidate_catboost(fit_train_df, val_df, station_categories)
         _, val_mae_pred = gbm_candidate_mae(fit_train_df, val_df, station_categories)
+        _, val_delta_pred = gbm_candidate_delta(fit_train_df, val_df, station_categories)
         val_gbm_acc_by_type = {
             "sklearn": evaluate_by_station(val_df, val_gbm_pred).set_index("station_id")["accuracy"],
             "catboost": evaluate_by_station(val_df, val_catboost_pred).set_index("station_id")["accuracy"],
             "sklearn_mae": evaluate_by_station(val_df, val_mae_pred).set_index("station_id")["accuracy"],
+            "delta": evaluate_by_station(val_df, val_delta_pred).set_index("station_id")["accuracy"],
         }
         gbm_model_type_by_station = {
             sid: max(val_gbm_acc_by_type, key=lambda t: val_gbm_acc_by_type[t].get(sid, -1))
             for sid in station_categories
         }
-        val_preds_by_type = {"sklearn": val_gbm_pred, "catboost": val_catboost_pred, "sklearn_mae": val_mae_pred}
+        val_preds_by_type = {
+            "sklearn": val_gbm_pred, "catboost": val_catboost_pred,
+            "sklearn_mae": val_mae_pred, "delta": val_delta_pred,
+        }
         val_station_ids = val_df["station_id"].astype(str).to_numpy()
         val_type_arr = np.array([gbm_model_type_by_station.get(sid, DEFAULT_GBM_TYPE) for sid in val_station_ids])
         val_gbm_pred = np.select(
@@ -827,9 +892,16 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         model_sklearn, gbm_pred_sklearn = gbm_candidate(full_train_df, test_df, station_categories)
         model_catboost, gbm_pred_catboost = gbm_candidate_catboost(full_train_df, test_df, station_categories)
         model_mae, gbm_pred_mae = gbm_candidate_mae(full_train_df, test_df, station_categories)
-        models_by_type = {"sklearn": model_sklearn, "catboost": model_catboost, "sklearn_mae": model_mae}
+        model_delta, gbm_pred_delta = gbm_candidate_delta(full_train_df, test_df, station_categories)
+        models_by_type = {
+            "sklearn": model_sklearn, "catboost": model_catboost,
+            "sklearn_mae": model_mae, "delta": model_delta,
+        }
         model = PerStationGBM(models_by_type, gbm_model_type_by_station)
-        test_preds_by_type = {"sklearn": gbm_pred_sklearn, "catboost": gbm_pred_catboost, "sklearn_mae": gbm_pred_mae}
+        test_preds_by_type = {
+            "sklearn": gbm_pred_sklearn, "catboost": gbm_pred_catboost,
+            "sklearn_mae": gbm_pred_mae, "delta": gbm_pred_delta,
+        }
         test_station_ids = test_df["station_id"].astype(str).to_numpy()
         test_type_arr = np.array([gbm_model_type_by_station.get(sid, DEFAULT_GBM_TYPE) for sid in test_station_ids])
         gbm_pred = np.select(
@@ -839,7 +911,7 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         )
         gbm_by_station = evaluate_by_station(test_df, gbm_pred)
         gbm_overall_wape, gbm_overall_acc = wape_accuracy(test_df["target_demand"], gbm_pred)
-        for type_name in ("catboost", "sklearn_mae"):
+        for type_name in ("catboost", "sklearn_mae", "delta"):
             chosen = [sid for sid, t in gbm_model_type_by_station.items() if t == type_name]
             if chosen:
                 print(f"  -> {type_name} elegido (sobre sklearn GBM Poisson) en estaciones: {chosen}")
