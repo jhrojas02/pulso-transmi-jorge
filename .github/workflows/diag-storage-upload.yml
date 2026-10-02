@@ -1,0 +1,51 @@
+name: pulso-transmi-diag-storage-upload
+
+# Utilitario puntual (2026-10-02): storage_upload() en promote.py viene
+# fallando con "400 Bad Request" sin más detalle al subir un modelo real
+# (~7-9MB), y cada intento de reproducirlo cuesta ~23min de entrenamiento
+# real. Este workflow sube un archivo de prueba chiquito directo a
+# Storage (mismo bucket "models", mismo endpoint) para ver el error real
+# en segundos en vez de volver a esperar un entrenamiento completo. Solo
+# workflow_dispatch, nunca corre solo.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Subir archivo de prueba a Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          echo "hola mundo" > /tmp/test.txt
+          echo "--- subida chiquita (12 bytes) ---"
+          curl -sS -o /tmp/resp1.json -w "HTTP %{http_code}\n" \
+            -X POST "$SUPABASE_URL/storage/v1/object/models/diag_test/chiquito.txt" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: text/plain" \
+            -H "x-upsert: true" \
+            --data-binary @/tmp/test.txt
+          cat /tmp/resp1.json; echo
+          echo "--- subida grande simulada (10MB, como un .joblib real) ---"
+          head -c 10000000 /dev/urandom > /tmp/test_big.bin
+          curl -sS -o /tmp/resp2.json -w "HTTP %{http_code}\n" \
+            -X POST "$SUPABASE_URL/storage/v1/object/models/diag_test/grande.bin" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
+            --data-binary @/tmp/test_big.bin
+          cat /tmp/resp2.json; echo
+          echo "--- subida con path real (nombre con guiones bajos y slash, como gbm.joblib) ---"
+          curl -sS -o /tmp/resp3.json -w "HTTP %{http_code}\n" \
+            -X POST "$SUPABASE_URL/storage/v1/object/models/model_2026-10-02_hybrid_h15_vtest/gbm.joblib" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
+            --data-binary @/tmp/test.txt
+          cat /tmp/resp3.json; echo
