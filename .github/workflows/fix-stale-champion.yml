@@ -1,0 +1,52 @@
+name: pulso-transmi-fix-stale-champion
+
+# Utilitario puntual (2026-10-02): algunas corridas de train.yml en el
+# proyecto nuevo de Supabase corrieron con DATABASE_URL todavía configurada
+# (antes de abandonar pg_client.py por los cuelgues) y promovieron un
+# champion usando pg_client.storage_upload — que guarda el .joblib como
+# bytea en la tabla `model_blob` de Postgres, NO como un objeto real de
+# Supabase Storage. El `champion`/`modelo` quedaron apuntando a un
+# artifact_uri que nunca existió en Storage. Con DATABASE_URL ya borrada,
+# promote.py vuelve a la REST API (storage_download contra Storage de
+# verdad) y revienta con 400 al intentar bajar ese objeto fantasma
+# (confirmado: run 37048141558, horizon_min=15, model_2026-10-02_hybrid_
+# h15_v202610021638/gbm.joblib).
+#
+# Esto borra esas filas de `champion` — vuelve el estado a "sin champion
+# vigente" para cada horizonte, que promote.py maneja de forma segura
+# (should_promote=True sin comparación, igual que un proyecto nuevo). No
+# se pierde nada real: ningún champion promovido así era de verdad
+# accesible por el pipeline en producción. Solo workflow_dispatch, nunca
+# corre solo.
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Borrar filas stale de champion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          echo "--- antes ---"
+          curl -sS "$SUPABASE_URL/rest/v1/champion?select=horizon_min,model_id" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY"
+          echo
+          echo "--- borrando ---"
+          curl -sS -o /tmp/del_resp.json -w "%{http_code}" \
+            -X DELETE "$SUPABASE_URL/rest/v1/champion?horizon_min=gt.0" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Prefer: return=minimal" > /tmp/del_status.txt
+          status=$(cat /tmp/del_status.txt)
+          echo "status=$status"; cat /tmp/del_resp.json; echo
+          if [ "$status" != "200" ] && [ "$status" != "204" ]; then
+            echo "::error::DELETE de champion falló (HTTP $status)"
+            exit 1
+          fi
+          echo "--- después ---"
+          curl -sS "$SUPABASE_URL/rest/v1/champion?select=horizon_min,model_id" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY"
+          echo
