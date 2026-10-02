@@ -24,6 +24,8 @@ import sys
 
 import requests
 
+from src.schema_guard import SchemaDriftError, report_schema_drift, validate_context, validate_observations, validate_stations
+
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -100,8 +102,17 @@ def _supabase_max(table, column):
     return data[0][column] if data else None
 
 
+def _validate_or_report(validate_fn, rows):
+    try:
+        validate_fn(rows)
+    except SchemaDriftError as e:
+        report_schema_drift(e)
+        raise
+
+
 def ingest_stations():
     stations = _api_get("/v1/stations")["data"]
+    _validate_or_report(validate_stations, stations)
     rows = [
         {
             "station_id": s["station_id"],
@@ -118,12 +129,14 @@ def ingest_stations():
 
 def ingest_context(since=None):
     rows = list(_paginate("/v1/context", since=since))
+    _validate_or_report(validate_context, rows)
     n = _supabase_upsert("contexto", rows, on_conflict="observed_at")
     print(f"contexto: {n} filas (since={since})")
 
 
 def ingest_observations(since=None):
     rows = list(_paginate("/v1/observations", since=since))
+    _validate_or_report(validate_observations, rows)
     rows = [
         {"station_id": o["station_id"], "observed_at": o["observed_at"], "demand": o["demand"]}
         for o in rows

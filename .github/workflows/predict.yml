@@ -12,6 +12,7 @@ concurrency:
 permissions:
   contents: read
   actions: write  # monitor.py necesita esto para poder disparar train.yml si detecta drift fuerte
+  issues: write   # schema_guard.py necesita esto para abrir un issue si detecta cambio de formato
 
 jobs:
   predict:
@@ -44,6 +45,7 @@ jobs:
           # probada). Si este secret existe igual, supabase_client.py lo
           # usaría en vez de REST — debe estar vacío/borrado.
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # schema_guard.py: abre un issue si el sync detecta cambio de formato
         run: python -m src.pipeline.submit_current_cycle
       - name: Evaluar predicciones ya resueltas (y disparar reentrenamiento si hay drift)
         env:

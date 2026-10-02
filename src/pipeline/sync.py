@@ -35,6 +35,7 @@ import pandas as pd
 from src import supabase_client as sb
 from src.features import climatological_context, estimate_context_row
 from src.http_retry import request_with_retry
+from src.schema_guard import SchemaDriftError, report_schema_drift, validate_observations
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 SOURCE = "observations_stream"
@@ -91,6 +92,17 @@ def sync_observations_from_saved_cursor():
         rows = body.get("data", [])
         if not rows:
             break
+
+        # Validar la forma cruda ANTES de tocar Supabase (ver
+        # schema_guard.py) — el profesor avisó que viene un cambio de
+        # formato fuerte; esto corre cada 10min sin supervisión, así
+        # que debe fallar alto y claro en vez de escribir datos mal
+        # interpretados silenciosamente.
+        try:
+            validate_observations(rows)
+        except SchemaDriftError as e:
+            report_schema_drift(e)
+            raise
 
         _ensure_context_for({row["observed_at"] for row in rows})
 
