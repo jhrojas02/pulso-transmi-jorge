@@ -607,8 +607,19 @@ FAST_BOOST_HORIZONS = {15, 30, 45, 60}  # los 4 horizontes: con lag_1 como
 # +10.3 puntos).
 FAST_BOOST_THRESHOLD = 0.10  # desviación mínima (10%) de boost_fast vs.
 # naive para activar el boost.
-FAST_BOOST_K = 0.5  # cuánto w_fast se suma por cada punto de desviación por
-# encima del umbral (capado a 1.0).
+FAST_BOOST_K = 0.5  # valor por defecto si no hay entrada en
+# FAST_BOOST_K_BY_HORIZON para el horizonte pedido.
+FAST_BOOST_K_BY_HORIZON = {15: 0.5, 30: 0.3, 45: 0.1, 60: 0.05}  # k por
+# horizonte en vez de un único valor global — encontrado por sweep real
+# sobre estaciones de "ráfaga" (02300/06000/07111/05000/09122, TEST_DAYS=7
+# completo, 2026-10-02): el boost de extrapolación de tendencia
+# sobrecorrige sistemáticamente justo cuando la demanda revierte, y ese
+# sobrecorrección empeora cuanto más largo es el horizonte (más tiempo
+# para que la tendencia extrapolada se aleje de la realidad). k=0.5 (el
+# valor global anterior) seguía siendo ~óptimo en +15min, pero en
+# +30min perdía ~0.2-1.7pts vs. el pico en k≈0.3, en +45min perdía
+# ~1.4pts vs. el pico en k≈0.1, y en +60min perdía ~4.5pts vs. el pico en
+# k≈0.05 (el PEOR valor de todo el sweep para ese horizonte).
 
 
 def compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min, threshold=None, k=None):
@@ -633,7 +644,7 @@ def compute_fast_boost(naive_pred, boost_fast_pred, is_drifted, horizon_min, thr
     if horizon_min not in FAST_BOOST_HORIZONS:
         return np.zeros(len(np.asarray(naive_pred)))
     threshold = FAST_BOOST_THRESHOLD if threshold is None else threshold
-    k = FAST_BOOST_K if k is None else k
+    k = FAST_BOOST_K_BY_HORIZON.get(horizon_min, FAST_BOOST_K) if k is None else k
     naive_pred = np.asarray(naive_pred, dtype=float)
     boost_fast_pred = np.asarray(boost_fast_pred, dtype=float)
     naive_safe = np.where(naive_pred == 0, np.nan, naive_pred)
