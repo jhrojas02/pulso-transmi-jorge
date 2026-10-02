@@ -49,3 +49,31 @@ jobs:
             -H "x-upsert: true" \
             --data-binary @/tmp/test.txt
           cat /tmp/resp3.json; echo
+          for mb in 30 50 80 120; do
+            echo "--- subida de ${mb}MB ---"
+            head -c $((mb * 1000000)) /dev/urandom > /tmp/test_${mb}.bin
+            curl -sS -o /tmp/resp_${mb}.json -w "HTTP %{http_code}\n" \
+              -X POST "$SUPABASE_URL/storage/v1/object/models/diag_test/${mb}mb.bin" \
+              -H "apikey: $SUPABASE_SERVICE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+              -H "Content-Type: application/octet-stream" \
+              -H "x-upsert: true" \
+              --data-binary @/tmp/test_${mb}.bin
+            cat /tmp/resp_${mb}.json; echo
+            rm -f /tmp/test_${mb}.bin
+          done
+          echo "--- vía python requests (igual a supabase_client.py) con 40MB ---"
+          python3 -c "
+import os, requests
+data = os.urandom(40_000_000)
+url = os.environ['SUPABASE_URL'] + '/storage/v1/object/models/diag_test/py40mb.bin'
+headers = {
+    'apikey': os.environ['SUPABASE_SERVICE_KEY'],
+    'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_KEY'],
+    'Content-Type': 'application/octet-stream',
+    'x-upsert': 'true',
+}
+r = requests.post(url, headers=headers, data=data, timeout=60)
+print('status', r.status_code)
+print(r.text[:2000])
+"
