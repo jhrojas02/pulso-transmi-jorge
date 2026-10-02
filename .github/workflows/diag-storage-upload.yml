@@ -63,17 +63,4 @@ jobs:
             rm -f /tmp/test_${mb}.bin
           done
           echo "--- vía python requests (igual a supabase_client.py) con 40MB ---"
-          python3 -c "
-import os, requests
-data = os.urandom(40_000_000)
-url = os.environ['SUPABASE_URL'] + '/storage/v1/object/models/diag_test/py40mb.bin'
-headers = {
-    'apikey': os.environ['SUPABASE_SERVICE_KEY'],
-    'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_KEY'],
-    'Content-Type': 'application/octet-stream',
-    'x-upsert': 'true',
-}
-r = requests.post(url, headers=headers, data=data, timeout=60)
-print('status', r.status_code)
-print(r.text[:2000])
-"
+          python3 -c "import os, requests; data = os.urandom(40_000_000); url = os.environ['SUPABASE_URL'] + '/storage/v1/object/models/diag_test/py40mb.bin'; headers = {'apikey': os.environ['SUPABASE_SERVICE_KEY'], 'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_KEY'], 'Content-Type': 'application/octet-stream', 'x-upsert': 'true'}; r = requests.post(url, headers=headers, data=data, timeout=60); print('status', r.status_code); print(r.text[:2000])"
