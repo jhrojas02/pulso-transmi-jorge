@@ -928,15 +928,21 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         # usando exclusivamente el modelo entrenado con full_train_df,
         # nunca este, así que la decisión de promoción sigue siendo
         # honesta (sin fuga de test_df hacia la métrica de decisión).
+        # Solo se reentrena (y se guarda) el tipo de candidato que de verdad
+        # gana en al menos una estación (gbm_model_type_by_station, decidido
+        # en el Paso 1) — nunca los 4 completos. Con los 4 siempre incluidos,
+        # el .joblib pasó el límite de tamaño de Supabase Storage del
+        # proyecto (confirmado 2026-10-02: subida real con 400/EntityTooLarge,
+        # mientras que archivos de prueba de 50MB sí pasaban y de 80MB no) —
+        # y entrenar tipos que ninguna estación usa es trabajo tirado de
+        # todos modos, nunca se sirven en predict().
         dummy_test = df_h.iloc[:1]
-        model_sklearn_deploy, _ = gbm_candidate(df_h, dummy_test, station_categories)
-        model_catboost_deploy, _ = gbm_candidate_catboost(df_h, dummy_test, station_categories)
-        model_mae_deploy, _ = gbm_candidate_mae(df_h, dummy_test, station_categories)
-        model_delta_deploy, _ = gbm_candidate_delta(df_h, dummy_test, station_categories)
-        models_by_type_deploy = {
-            "sklearn": model_sklearn_deploy, "catboost": model_catboost_deploy,
-            "sklearn_mae": model_mae_deploy, "delta": model_delta_deploy,
+        candidate_fn_by_type = {
+            "sklearn": gbm_candidate, "catboost": gbm_candidate_catboost,
+            "sklearn_mae": gbm_candidate_mae, "delta": gbm_candidate_delta,
         }
+        used_types = set(gbm_model_type_by_station.values())
+        models_by_type_deploy = {t: candidate_fn_by_type[t](df_h, dummy_test, station_categories)[0] for t in used_types}
         model = PerStationGBM(models_by_type_deploy, gbm_model_type_by_station)
 
         # Autovalidación del boost (2026-09-30): antes de confiar en
