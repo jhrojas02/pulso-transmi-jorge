@@ -42,7 +42,20 @@ def _require_config():
 
 def _connect():
     _require_config()
-    return psycopg2.connect(DATABASE_URL)
+    # connect_timeout explícito (2026-10-02): sin esto, psycopg2.connect()
+    # puede colgarse INDEFINIDAMENTE si la red hacia Postgres se pone lenta
+    # o se cae a mitad de camino — nunca lanza error, solo se queda
+    # esperando. Confirmado en producción: un train.yml con timeout de 60
+    # min se agotó entero colgado acá (la fase de entrenamiento en sí había
+    # terminado en ~20 min), sin ningún traceback. 15s es generoso para una
+    # conexión sana; si Postgres de verdad no responde, mejor fallar rápido
+    # (el job entero se pierde igual, pero al menos no desperdicia los 60
+    # min completos del timeout del workflow). statement_timeout cubre el
+    # otro extremo: una QUERY que ya conectó bien pero se queda colgada a
+    # mitad de camino (ej. la red se cae justo transfiriendo un model_blob
+    # de 7-9MB) — sin esto, psycopg2 espera indefinidamente la respuesta
+    # del socket, mismo síntoma que connect_timeout pero en otra fase.
+    return psycopg2.connect(DATABASE_URL, connect_timeout=15, options="-c statement_timeout=30000")
 
 
 def _parse_filter(value):
