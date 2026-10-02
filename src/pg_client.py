@@ -57,7 +57,13 @@ def _connect():
     # DESPUÉS de conectar es más confiable: es una query normal, no depende
     # de que el pooler reenvíe parámetros de conexión.
     with conn.cursor() as cur:
-        cur.execute("SET statement_timeout = 30000")
+        # Subido de 30s a 120s (2026-10-02): el SET sí funciona — confirmado
+        # en producción con un psycopg2.errors.QueryCanceled real en vez de
+        # un cuelgue silencioso — pero 30s cortaba storage_upload() subiendo
+        # un model_blob de 7-9MB como bytea, que en este proyecto nuevo (free
+        # tier recién creado) tarda más que eso. 120s sigue acotado (nunca
+        # cuelga indefinido) pero da margen de sobra para ese caso real.
+        cur.execute("SET statement_timeout = 120000")
     return conn
 
 
