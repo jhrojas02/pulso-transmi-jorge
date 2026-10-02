@@ -1011,8 +1011,17 @@ def run(observations: pd.DataFrame, context: pd.DataFrame):
         # codifica la categórica por posición, no por el string, así que
         # predict.py debe reconstruir exactamente el mismo orden o las
         # predicciones quedarían mal asignadas sin ningún error visible.
+        # compress=3 (2026-10-02): el proyecto de Supabase Storage tiene un
+        # límite de tamaño de archivo entre 50-80MB — podar los tipos de GBM
+        # no usados (ver arriba) no alcanzó para +45min, que sigue usando
+        # varios tipos a la vez (confirmado: EntityTooLarge real en
+        # producción). La compresión de joblib es transparente (sin cambiar
+        # el modelo ni requerir tocar predict.py — joblib.load detecta el
+        # formato solo) y los árboles de GBM comprimen muy bien por su
+        # redundancia estructural; 3 es un balance razonable entre tamaño y
+        # velocidad de guardado/carga (no se necesita el máximo de 9 acá).
         model_path = ARTIFACTS_DIR / f"gbm_h{horizon_min}.joblib"
-        joblib.dump({"model": model, "station_categories": station_categories}, model_path)
+        joblib.dump({"model": model, "station_categories": station_categories}, model_path, compress=3)
 
         summary_rows.append({
             "horizon_min": horizon_min,
