@@ -1,0 +1,29 @@
+name: pulso-transmi-bootstrap-new-supabase
+
+# Utilitario puntual (2026-10-02): el Supabase original quedó restringido
+# (cuota de Cached Egress agotada + spend cap en $0, ver docs/plan-b-postgres.md
+# y la nota en CLAUDE.md) y la conexión directa a Postgres también empezó a
+# fallar, no solo la REST API — así que ni siquiera se puede copiar el
+# histórico DESDE el proyecto viejo. Este workflow ingiere todo el histórico
+# directo desde la API del profesor (src/ingest.py --full) hacia el proyecto
+# de Supabase que esté configurado en los secrets — nunca toca el viejo.
+# Solo workflow_dispatch, nunca corre solo. Seguro de repetir (upsert por PK).
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Ingestar histórico completo desde la API del profesor
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m src.ingest --full
