@@ -36,9 +36,13 @@ jobs:
           PULSO_API_KEY: ${{ secrets.PULSO_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # Reactivada 2026-09-30: Supabase devuelve 402 (cuota de Cached
-          # Egress agotada hasta el 17 de octubre) — probando si Neon sigue
-          # disponible como fallback. Ver docs/plan-b-postgres.md.
+          # DATABASE_URL vacío a propósito (2026-10-02): el proyecto de
+          # Supabase original quedó restringido (cuota), se migró todo a un
+          # proyecto nuevo, y la conexión Postgres directa a ESE proyecto
+          # nuevo se colgó repetidas veces sin que ningún timeout lo
+          # arreglara del todo — se volvió a la REST API normal (más
+          # probada). Si este secret existe igual, supabase_client.py lo
+          # usaría en vez de REST — debe estar vacío/borrado.
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.pipeline.submit_current_cycle
       - name: Evaluar predicciones ya resueltas (y disparar reentrenamiento si hay drift)

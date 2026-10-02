@@ -30,17 +30,41 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Asegurar que exista el bucket "models" en Storage
+        # Proyecto de Supabase nuevo (2026-10-02, el original quedó
+        # restringido por cuota — ver docs/plan-b-postgres.md): Storage
+        # arranca sin buckets, y storage_upload() fallaría la primera vez
+        # que promote.py intente subir un modelo. Crear el bucket acá
+        # (idempotente — 200 si no existía, 409 "already exists" si ya
+        # estaba, ambos están bien) evita perder una corrida entera de
+        # entrenamiento por algo que se arregla en un segundo.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          curl -sS -o /tmp/bucket_resp.json -w "%{http_code}" \
+            -X POST "$SUPABASE_URL/storage/v1/bucket" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"models","public":false}' > /tmp/bucket_status.txt
+          status=$(cat /tmp/bucket_status.txt)
+          echo "status=$status"; cat /tmp/bucket_resp.json; echo
+          if [ "$status" != "200" ] && [ "$status" != "409" ]; then
+            echo "::error::No se pudo crear/confirmar el bucket 'models' (HTTP $status)"
+            exit 1
+          fi
       - name: Entrenar candidato y promover si supera al champion
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # Reactivada 2026-09-30: Supabase REST/Storage devuelve 402 (cuota
-          # de Cached Egress agotada hasta el 17 de octubre) — DATABASE_URL
-          # ahora apunta a la conexión directa a Postgres de la MISMA base
-          # de Supabase (no Neon), que no cuenta contra esa cuota. Los
-          # modelos champion ya se migraron a model_blob (ver
-          # migrate-model-blob.yml). Ver docs/plan-b-postgres.md.
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # DATABASE_URL se dejó de usar (2026-10-02): la conexión directa a
+          # Postgres del proyecto nuevo se colgó 3 veces en distintos
+          # puntos (ver historial del commit) sin que ningún timeout lo
+          # arreglara del todo — volvió a la REST API normal de Supabase
+          # (más probada, con timeouts por request ya establecidos). Si el
+          # secret DATABASE_URL sigue configurado igual, supabase_client.py
+          # lo usaría en vez de REST — se espera que esté vacío/borrado.
           GITHUB_SHA: ${{ github.sha }}
         # timeout explícito (2026-10-02): el proceso se colgó 2 veces sin
         # ningún traceback (una query a Postgres que nunca respondía ni
