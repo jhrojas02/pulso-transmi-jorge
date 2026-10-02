@@ -50,7 +50,13 @@ jobs:
             -d '{"name":"models","public":false}' > /tmp/bucket_status.txt
           status=$(cat /tmp/bucket_status.txt)
           echo "status=$status"; cat /tmp/bucket_resp.json; echo
-          if [ "$status" != "200" ] && [ "$status" != "409" ]; then
+          # Supabase devuelve el "ya existe" como HTTP 400 (no 409) con
+          # {"statusCode":"409",...,"code":"BucketAlreadyExists"} en el body
+          # (confirmado en producción 2026-10-02: tiró un run entero de
+          # train.yml en 1 minuto, antes de entrenar nada, por chequear
+          # solo el código HTTP crudo sin mirar el body) — se trata igual
+          # como éxito si el body confirma que es justamente ese caso.
+          if [ "$status" != "200" ] && [ "$status" != "409" ] && ! grep -q "BucketAlreadyExists" /tmp/bucket_resp.json; then
             echo "::error::No se pudo crear/confirmar el bucket 'models' (HTTP $status)"
             exit 1
           fi
