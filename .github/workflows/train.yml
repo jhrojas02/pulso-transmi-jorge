@@ -42,4 +42,10 @@ jobs:
           # migrate-model-blob.yml). Ver docs/plan-b-postgres.md.
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GITHUB_SHA: ${{ github.sha }}
-        run: python -m src.pipeline.promote
+        # timeout explícito (2026-10-02): el proceso se colgó 2 veces sin
+        # ningún traceback (una query a Postgres que nunca respondía ni
+        # fallaba) y se comió el timeout-minutes completo del job las dos
+        # veces. `timeout` de coreutils mata el proceso a los 35 min pase
+        # lo que pase, así el job falla rápido y con una señal clara en
+        # vez de agotar el límite del workflow entero en silencio.
+        run: timeout 2100 python -m src.pipeline.promote

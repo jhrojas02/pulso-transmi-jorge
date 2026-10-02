@@ -48,14 +48,17 @@ def _connect():
     # esperando. Confirmado en producción: un train.yml con timeout de 60
     # min se agotó entero colgado acá (la fase de entrenamiento en sí había
     # terminado en ~20 min), sin ningún traceback. 15s es generoso para una
-    # conexión sana; si Postgres de verdad no responde, mejor fallar rápido
-    # (el job entero se pierde igual, pero al menos no desperdicia los 60
-    # min completos del timeout del workflow). statement_timeout cubre el
-    # otro extremo: una QUERY que ya conectó bien pero se queda colgada a
-    # mitad de camino (ej. la red se cae justo transfiriendo un model_blob
-    # de 7-9MB) — sin esto, psycopg2 espera indefinidamente la respuesta
-    # del socket, mismo síntoma que connect_timeout pero en otra fase.
-    return psycopg2.connect(DATABASE_URL, connect_timeout=15, options="-c statement_timeout=30000")
+    # conexión sana; si Postgres de verdad no responde, mejor fallar rápido.
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
+    # statement_timeout vía `options` en connect() (intento anterior) NO
+    # alcanzó: confirmado en producción que el hang siguió pasando igual
+    # con eso puesto — el pooler de Supabase (Supavisor) probablemente
+    # ignora opciones de arranque arbitrarias. Fijarlo con un SET explícito
+    # DESPUÉS de conectar es más confiable: es una query normal, no depende
+    # de que el pooler reenvíe parámetros de conexión.
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = 30000")
+    return conn
 
 
 def _parse_filter(value):
