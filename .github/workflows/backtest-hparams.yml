@@ -1,0 +1,28 @@
+name: pulso-transmi-backtest-hparams
+
+# Backtest puntual (2026-10-03): ¿ayuda tener hiperparámetros del GBM
+# distintos por estación (más regularizados para estaciones volátiles
+# como 05100) en vez de los mismos para las 12? Se mide en el split de
+# validación de train.py (fit_train_df -> val_df, el mismo que ya usa
+# la selección de tipo de candidato por estación) — nunca toca test_df,
+# no hay fuga. No escribe nada, no sube modelos. Solo
+# workflow_dispatch, nunca corre solo.
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Backtest de hiperparámetros por estación
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.backtest_hparams
