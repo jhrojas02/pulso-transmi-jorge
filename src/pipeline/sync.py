@@ -90,8 +90,15 @@ def sync_observations_from_saved_cursor():
     # veces/día, justo el tipo de carga repetitiva que agotó la cuota del
     # proyecto anterior. Se filtra del lado nuestro ANTES de escribir:
     # solo se manda a Supabase lo que es más nuevo que lo que ya tenemos.
-    last_row = sb.select_one("observacion", select="observed_at", order="observed_at.desc")
-    known_max = pd.Timestamp(last_row["observed_at"]) if last_row else None
+    #
+    # select_top, NUNCA select_one, para esto: select_one pagina de a 1
+    # fila por request (ver su propio docstring en supabase_client.py) —
+    # en una tabla de 65k+ filas SIN filtro eso son 65k+ requests
+    # secuenciales. Confirmado en producción: colgó predict.yml varios
+    # minutos antes de que se cancelara a mano. select_top usa `limit`
+    # de PostgREST — una sola request.
+    last_rows = sb.select_top("observacion", select="observed_at", order="observed_at.desc", limit=1)
+    known_max = pd.Timestamp(last_rows[0]["observed_at"]) if last_rows else None
 
     total = 0
     while True:
