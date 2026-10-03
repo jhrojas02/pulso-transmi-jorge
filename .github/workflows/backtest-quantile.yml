@@ -1,0 +1,29 @@
+name: pulso-transmi-backtest-quantile
+
+# Backtest puntual (2026-10-03): el diagnóstico de producción mostró
+# que 07107/02300/05100 sobre-predicen sistemáticamente (nunca al
+# revés) — la firma de usar una pérdida que apunta a la media/mediana
+# cuando el sesgo pide apuntar un poco más abajo. Prueba loss=quantile
+# con q<0.5 (y un suavizado simple como hipótesis alternativa) contra
+# el baseline, en el split de validación de train.py (fit_train_df ->
+# val_df, nunca toca test_df) — no hay fuga. No escribe nada, no sube
+# modelos. Solo workflow_dispatch, nunca corre solo.
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Backtest de pérdida por cuantil y suavizado
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.backtest_quantile
