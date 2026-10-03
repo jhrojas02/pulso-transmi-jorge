@@ -1,0 +1,27 @@
+name: pulso-transmi-diag-recent-accuracy
+
+# Utilitario puntual (2026-10-03): el portal muestra "últimos 6 ciclos"
+# estancado en el último punto pese a la recuperación reciente. Este
+# workflow desglosa la accuracy real (prediccion vs. observacion) de
+# los últimos ciclos por horizonte y estación para encontrar qué está
+# frenando la subida, sin esperar otro entrenamiento completo. Solo
+# workflow_dispatch, nunca corre solo, no escribe nada.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Desglosar accuracy reciente por horizonte y estacion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scripts/diag_recent_accuracy.py
