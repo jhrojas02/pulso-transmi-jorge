@@ -32,15 +32,19 @@ import os
 import requests
 
 # Rango de demanda plausible por fila (una estación, un timestamp de
-# ~15min). Nunca se vio nada cerca de esto en producción (cientos, no
-# miles) — generoso a propósito para no disparar por drift real de
-# demanda (que es justo lo que el profesor va a subir), solo por un
-# cambio de escala/unidad que lo saque por completo de este rango.
-_DEMAND_SANITY_MAX = 20000
+# ~15min). Nunca se vio nada cerca de esto en producción (máximo real
+# observado ~2400) — generoso A PROPÓSITO (subido de 20000 a 50000,
+# 2026-10-03) para no disparar por el drift mucho más fuerte que el
+# profesor avisó que viene: un bug real de escala/unidad típicamente
+# se sale por varios órdenes de magnitud (x100, x1000), así que sigue
+# atrapando eso sin arriesgar bloquear demanda real más intensa.
+_DEMAND_SANITY_MAX = 50000
 
 _OBSERVATION_REQUIRED_KEYS = {"station_id", "observed_at", "demand"}
 _STATION_REQUIRED_KEYS = {"station_id", "station_name", "corridor", "latitude", "longitude"}
 _CONTEXT_REQUIRED_KEYS = {"observed_at"}
+_CYCLE_REQUIRED_KEYS = {"state", "cycle_id", "data_cutoff", "targets"}
+_TARGET_REQUIRED_KEYS = {"station_id", "target_at"}
 
 
 class SchemaDriftError(RuntimeError):
@@ -74,6 +78,25 @@ def validate_stations(rows):
 
 def validate_context(rows):
     _check_required_keys("contexto (/v1/context o /v1/stream)", rows, _CONTEXT_REQUIRED_KEYS)
+
+
+def validate_cycle(cycle):
+    """Valida /v1/forecast-cycles/current ANTES de mirar cycle["state"].
+
+    Punto ciego real encontrado 2026-10-03: get_current_cycle() usa
+    cycle.get("state") != "open" para decidir si hay algo que predecir.
+    Si el profesor renombra "state" (parte del cambio de formato que
+    avisó que viene), .get() no truena — devuelve None, que != "open",
+    así que el pipeline trata CADA ciclo como cerrado, en silencio, para
+    siempre, sin ningún error que avise. Validar la forma ANTES de leer
+    "state" convierte ese silencio en una alerta clara."""
+    label = "ciclo vigente (/v1/forecast-cycles/current)"
+    if not _CYCLE_REQUIRED_KEYS.issubset(cycle.keys()):
+        raise SchemaDriftError(_describe_mismatch(label, cycle, _CYCLE_REQUIRED_KEYS))
+    targets = cycle.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise SchemaDriftError(f"{label}: 'targets' no es una lista no vacía — valor: {json.dumps(targets, default=str)[:300]}")
+    _check_required_keys(f"{label} (targets[0])", targets, _TARGET_REQUIRED_KEYS)
 
 
 def validate_observations(rows):

@@ -35,6 +35,7 @@ from src import train as train_mod
 from src.features import build_feature_frame, climatological_context, estimate_context_row, target_time_features
 from src.http_retry import request_with_retry
 from src.pipeline.sync import sync_observations_from_saved_cursor
+from src.schema_guard import SchemaDriftError, report_schema_drift, validate_cycle
 from src.train import FEATURE_COLS, weighted_naive_tables
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
@@ -61,6 +62,15 @@ def get_current_cycle():
         return None
     r.raise_for_status()
     cycle = r.json()
+    # Validar la forma ANTES de leer "state" (ver schema_guard.validate_cycle):
+    # si el profesor renombra ese campo, cycle.get("state") nunca truena —
+    # devuelve None, que != "open", y el pipeline trataría cada ciclo como
+    # cerrado en silencio, para siempre, sin ninguna alerta.
+    try:
+        validate_cycle(cycle)
+    except SchemaDriftError as e:
+        report_schema_drift(e)
+        raise
     if cycle.get("state") != "open":
         return None
     return cycle
