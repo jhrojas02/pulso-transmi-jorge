@@ -1,0 +1,28 @@
+name: pulso-transmi-diag-supabase-usage
+
+# Utilitario puntual (2026-10-03): el usuario preguntó si se está
+# usando bien el espacio de Supabase, para no repetir el incidente de
+# cuota del proyecto anterior. Mide Storage real (bucket "models" —
+# ¿hay artefactos viejos sin limpiar?), si el cursor de sync de verdad
+# avanza (o se re-sincroniza lo mismo cada 10min, desperdiciando
+# escrituras), y el tamaño de las tablas principales. Solo
+# workflow_dispatch, nunca corre solo, no escribe nada.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Medir uso real de Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.diag_supabase_usage
