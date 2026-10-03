@@ -117,10 +117,19 @@ def validate_observations(rows):
             )
 
 
+_ISSUE_TITLE = "Cambio de formato detectado en el API del profesor"
+
+
 def report_schema_drift(error: SchemaDriftError):
     """Imprime el diagnóstico siempre; si hay credenciales de GitHub
     Actions en el entorno, además abre un issue para que se note sin
-    tener que estar revisando logs."""
+    tener que estar revisando logs.
+
+    Dedupe (2026-10-03): predict.yml corre cada 10min — sin esto, un
+    formato roto dispararía un issue nuevo cada corrida (144/día) hasta
+    que alguien lo arregle, ahogando la señal real en ruido. Se
+    reutiliza el issue abierto existente con el mismo título (un
+    comentario con el error más reciente) en vez de crear uno nuevo."""
     print(f"::error::CAMBIO DE FORMATO DETECTADO — {error}")
 
     token = os.environ.get("GITHUB_TOKEN")
@@ -140,10 +149,38 @@ def report_schema_drift(error: SchemaDriftError):
         "definitivo) antes de reintentar."
     )
     try:
+        existing = requests.get(
+            f"https://api.github.com/repos/{repo}/issues",
+            headers=headers,
+            params={"state": "open", "per_page": 20},
+            timeout=15,
+        )
+        existing_issue = None
+        if existing.ok:
+            for issue in existing.json():
+                if issue.get("title") == _ISSUE_TITLE and "pull_request" not in issue:
+                    existing_issue = issue
+                    break
+        if existing_issue:
+            r = requests.post(
+                existing_issue["comments_url"],
+                headers=headers,
+                json={"body": f"Volvió a pasar:\n\n{body}"},
+                timeout=15,
+            )
+            if r.status_code == 201:
+                print(f"Comentario agregado al issue ya abierto: {existing_issue.get('html_url')}")
+            else:
+                print(f"No se pudo comentar en el issue existente ({r.status_code}): {r.text[:300]}")
+            return
+    except requests.RequestException as e:
+        print(f"No se pudo chequear issues existentes (error de red), se intenta crear uno nuevo igual: {e}")
+
+    try:
         r = requests.post(
             f"https://api.github.com/repos/{repo}/issues",
             headers=headers,
-            json={"title": "Cambio de formato detectado en el API del profesor", "body": body},
+            json={"title": _ISSUE_TITLE, "body": body},
             timeout=15,
         )
         if r.status_code in (200, 201):

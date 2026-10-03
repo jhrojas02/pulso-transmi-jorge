@@ -89,7 +89,19 @@ def sync_observations_from_saved_cursor():
         r = request_with_retry("GET", f"{API_BASE}/v1/stream/observations", params=params, timeout=30)
         r.raise_for_status()
         body = r.json()
-        rows = body.get("data", [])
+        # "data" ausente (campo renombrado) vs. [] real (nada nuevo todavía)
+        # son casos MUY distintos: body.get("data", []) los trataba igual,
+        # así que un cambio de formato acá se veía idéntico a "al día" —
+        # el sync se habría congelado para siempre, cada 10min, sin ningún
+        # error (mismo tipo de hueco que cycle.get("state"), 2026-10-03).
+        if "data" not in body:
+            e = SchemaDriftError(
+                f"stream/observations: falta la clave 'data' en la respuesta — "
+                f"claves recibidas: {sorted(body.keys())}"
+            )
+            report_schema_drift(e)
+            raise e
+        rows = body["data"]
         if not rows:
             break
 
@@ -114,6 +126,20 @@ def sync_observations_from_saved_cursor():
         total += len(payload)
 
         cursor = body.get("next_cursor")
+        # "next_cursor" ausente es NORMAL en la última página real (menos
+        # filas que el límite pedido) — pero una página LLENA (exactamente
+        # el límite) sin cursor es rara: lo más probable es que haya más
+        # datos y el campo se haya renombrado, no que justo haya terminado
+        # ahí. Sin esto, "next_cursor" renombrado se ve igual que "ya
+        # sincronizado" — el cursor nunca avanza y el sync se congela para
+        # siempre repitiendo la misma página.
+        if cursor is None and len(rows) >= params["limit"] and "next_cursor" not in body:
+            e = SchemaDriftError(
+                f"stream/observations: página llena ({len(rows)} filas) sin 'next_cursor' en la respuesta — "
+                f"claves recibidas: {sorted(body.keys())}"
+            )
+            report_schema_drift(e)
+            raise e
         sb.write(
             "sync_state",
             [{"source": SOURCE, "cursor_value": cursor, "updated_at": datetime.now(timezone.utc).isoformat()}],
