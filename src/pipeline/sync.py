@@ -81,6 +81,18 @@ def sync_observations_from_saved_cursor():
     state = sb.select_one("sync_state", filters={"source": f"eq.{SOURCE}"})
     cursor = state["cursor_value"] if state else None
 
+    # El cursor del stream no está avanzando (confirmado 2026-10-03:
+    # cursor_value queda en None entre corridas) — el stream re-sirve la
+    # misma ventana de ~12-13k filas cada 10min mientras el crecimiento
+    # real de la tabla en ese lapso fue de un puñado de filas. El upsert
+    # con ON CONFLICT DO NOTHING las ignora del lado de Postgres, pero
+    # igual se manda el payload completo a la REST API cada vez — 144
+    # veces/día, justo el tipo de carga repetitiva que agotó la cuota del
+    # proyecto anterior. Se filtra del lado nuestro ANTES de escribir:
+    # solo se manda a Supabase lo que es más nuevo que lo que ya tenemos.
+    last_row = sb.select_one("observacion", select="observed_at", order="observed_at.desc")
+    known_max = pd.Timestamp(last_row["observed_at"]) if last_row else None
+
     total = 0
     while True:
         params = {"limit": 5000}
@@ -116,14 +128,19 @@ def sync_observations_from_saved_cursor():
             report_schema_drift(e)
             raise
 
-        _ensure_context_for({row["observed_at"] for row in rows})
+        new_rows = rows if known_max is None else [row for row in rows if pd.Timestamp(row["observed_at"]) > known_max]
+        if len(new_rows) < len(rows):
+            print(f"sync: {len(rows) - len(new_rows)} filas re-servidas por el stream (ya las teníamos) — omitidas antes de escribir")
 
-        payload = [
-            {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": row["demand"]}
-            for row in rows
-        ]
-        sb.write("observacion", payload, on_conflict="station_id,observed_at", merge=False)
-        total += len(payload)
+        if new_rows:
+            _ensure_context_for({row["observed_at"] for row in new_rows})
+            payload = [
+                {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": row["demand"]}
+                for row in new_rows
+            ]
+            sb.write("observacion", payload, on_conflict="station_id,observed_at", merge=False)
+            total += len(payload)
+            known_max = max(pd.Timestamp(row["observed_at"]) for row in new_rows)
 
         cursor = body.get("next_cursor")
         # "next_cursor" ausente es NORMAL en la última página real (menos

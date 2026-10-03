@@ -1,0 +1,27 @@
+name: pulso-transmi-cleanup-diag-storage
+
+# Utilitario de un solo uso (2026-10-03): borra los archivos de prueba
+# que quedaron en Storage de los diagnósticos de esta sesión
+# (diag_test/, ~130MB, y un model_id de prueba vacío) — no sirven para
+# nada en producción y ocupan cuota sin razón. Solo workflow_dispatch,
+# nunca corre solo.
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Borrar archivos de prueba de Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          curl -sS -o /tmp/del_resp.json -w "HTTP %{http_code}\n" \
+            -X DELETE "$SUPABASE_URL/storage/v1/object/models" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"prefixes": ["diag_test/chiquito.txt", "diag_test/grande.bin", "diag_test/30mb.bin", "diag_test/50mb.bin", "diag_test/80mb.bin", "diag_test/120mb.bin", "diag_test/py40mb.bin", "model_2026-10-02_hybrid_h15_vtest/gbm.joblib"]}'
+          cat /tmp/del_resp.json; echo
