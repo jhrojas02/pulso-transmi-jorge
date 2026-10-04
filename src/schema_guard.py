@@ -106,12 +106,25 @@ def validate_cycle(cycle):
     _check_required_keys(f"{label} (targets[0])", targets, _TARGET_REQUIRED_KEYS)
 
 
+def is_missing_observation(row):
+    """True si esta fila es un hueco de datos LEGÍTIMO del formato nuevo
+    (measurement.quality="missing", value=null — confirmado en
+    producción 2026-10-04), no un cambio de formato. El profesor marca
+    explícitamente lecturas que no tiene, en vez de omitir la fila — hay
+    que saltarlas, no tratarlas como error fatal."""
+    measurement = row.get("measurement")
+    if not isinstance(measurement, dict):
+        return False
+    return measurement.get("quality") == "missing" or measurement.get("value") is None
+
+
 def _extract_demand(row, label):
     """Devuelve el valor crudo de demanda de una fila, aceptando el
     formato viejo (demand plano) y el nuevo (measurement.value, string)
     — ver nota sobre schema_version=2 arriba de
     _OBSERVATION_REQUIRED_KEYS_V1. Si no calza con NINGUNO de los dos,
-    es un formato genuinamente desconocido."""
+    es un formato genuinamente desconocido. Llamar solo cuando
+    is_missing_observation(row) ya dio False."""
     if "demand" in row:
         return row["demand"]
     if "measurement" in row:
@@ -145,6 +158,8 @@ def validate_observations(rows):
     label = "observaciones (/v1/observations o /v1/stream/observations)"
     _check_required_keys(label, rows, _OBSERVATION_BASE_KEYS)
     for row in rows:
+        if is_missing_observation(row):
+            continue
         demand = _coerce_demand_number(_extract_demand(row, label), label, row)
         if demand < 0 or demand > _DEMAND_SANITY_MAX:
             raise SchemaDriftError(
@@ -159,11 +174,16 @@ def normalize_observation(row):
     _extract_demand) a la forma plana {station_id, observed_at, demand}
     que usa el resto del pipeline (Supabase, features.py, train.py) —
     el único lugar que necesita saber que measurement.value existe.
+    Devuelve None si la fila es un hueco de datos legítimo (ver
+    is_missing_observation) — el caller debe filtrar esos None antes de
+    escribir a Supabase (observacion.demand es NOT NULL).
 
     demand se redondea a entero: measurement.value llega como string con
     decimales (ej. "546.00", confirmado en producción 2026-10-04), pero
     `observacion.demand` es `integer` en el esquema (supabase/schema.sql)
     — un float sin redondear ahí tira 400 Bad Request al escribir."""
+    if is_missing_observation(row):
+        return None
     label = "observaciones (/v1/observations o /v1/stream/observations)"
     demand = _coerce_demand_number(_extract_demand(row, label), label, row)
     return {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": int(round(demand))}

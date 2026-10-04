@@ -146,9 +146,15 @@ def sync_observations_from_saved_cursor():
             # measurement.value en string desde schema_version=2,
             # confirmado en producción 2026-10-04) a la forma plana que
             # espera Supabase — un solo lugar sabe que measurement existe.
-            payload = [normalize_observation(row) for row in new_rows]
-            sb.write("observacion", payload, on_conflict="station_id,observed_at", merge=False)
-            total += len(payload)
+            # Devuelve None para huecos de datos legítimos (quality=
+            # "missing", confirmado en producción 2026-10-04) — se
+            # excluyen del payload (observacion.demand es NOT NULL) pero
+            # SÍ cuentan para avanzar known_max, si no el sync los pediría
+            # de nuevo para siempre sin que nunca dejen de estar vacíos.
+            payload = [n for row in new_rows if (n := normalize_observation(row)) is not None]
+            if payload:
+                sb.write("observacion", payload, on_conflict="station_id,observed_at", merge=False)
+                total += len(payload)
             known_max = max(pd.Timestamp(row["observed_at"]) for row in new_rows)
 
         cursor = body.get("next_cursor")

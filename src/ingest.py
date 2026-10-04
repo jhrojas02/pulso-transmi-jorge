@@ -147,8 +147,10 @@ def ingest_observations(since=None):
     # normalize_observation (ver schema_guard.py) traduce el formato crudo
     # del API (viejo "demand" plano, o el nuevo measurement.value en
     # string desde schema_version=2, confirmado en producción 2026-10-04)
-    # a la forma plana que espera Supabase.
-    rows = [normalize_observation(o) for o in rows]
+    # a la forma plana que espera Supabase. Devuelve None para huecos de
+    # datos legítimos (quality="missing") — se excluyen (observacion.
+    # demand es NOT NULL).
+    rows = [n for o in rows if (n := normalize_observation(o)) is not None]
     n = _supabase_upsert("observacion", rows, on_conflict="station_id,observed_at")
     print(f"observacion: {n} filas (since={since})")
 
