@@ -24,7 +24,14 @@ import sys
 
 import requests
 
-from src.schema_guard import SchemaDriftError, report_schema_drift, validate_context, validate_observations, validate_stations
+from src.schema_guard import (
+    SchemaDriftError,
+    normalize_observation,
+    report_schema_drift,
+    validate_context,
+    validate_observations,
+    validate_stations,
+)
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -137,10 +144,11 @@ def ingest_context(since=None):
 def ingest_observations(since=None):
     rows = list(_paginate("/v1/observations", since=since))
     _validate_or_report(validate_observations, rows)
-    rows = [
-        {"station_id": o["station_id"], "observed_at": o["observed_at"], "demand": o["demand"]}
-        for o in rows
-    ]
+    # normalize_observation (ver schema_guard.py) traduce el formato crudo
+    # del API (viejo "demand" plano, o el nuevo measurement.value en
+    # string desde schema_version=2, confirmado en producción 2026-10-04)
+    # a la forma plana que espera Supabase.
+    rows = [normalize_observation(o) for o in rows]
     n = _supabase_upsert("observacion", rows, on_conflict="station_id,observed_at")
     print(f"observacion: {n} filas (since={since})")
 

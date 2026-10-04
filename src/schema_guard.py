@@ -40,7 +40,14 @@ import requests
 # atrapando eso sin arriesgar bloquear demanda real más intensa.
 _DEMAND_SANITY_MAX = 50000
 
-_OBSERVATION_REQUIRED_KEYS = {"station_id", "observed_at", "demand"}
+# Formato nuevo confirmado en producción 2026-10-04 (schema_version=2):
+# "demand" (número plano) se movió a measurement.value (STRING, ej.
+# "546.00") dentro de un objeto measurement, y aparecieron released_at/
+# schema_version/measurement.unit/measurement.quality. El formato viejo
+# (_OBSERVATION_REQUIRED_KEYS_V1) se deja documentado, no se borra, por
+# si el profesor revierte o mezcla versiones durante la transición.
+_OBSERVATION_REQUIRED_KEYS_V1 = {"station_id", "observed_at", "demand"}
+_MEASUREMENT_REQUIRED_KEYS = {"value"}
 _STATION_REQUIRED_KEYS = {"station_id", "station_name", "corridor", "latitude", "longitude"}
 _CONTEXT_REQUIRED_KEYS = {"observed_at"}
 _CYCLE_REQUIRED_KEYS = {"state", "cycle_id", "data_cutoff", "targets"}
@@ -99,22 +106,62 @@ def validate_cycle(cycle):
     _check_required_keys(f"{label} (targets[0])", targets, _TARGET_REQUIRED_KEYS)
 
 
+def _extract_demand(row, label):
+    """Devuelve el valor crudo de demanda de una fila, aceptando el
+    formato viejo (demand plano) y el nuevo (measurement.value, string)
+    — ver nota sobre schema_version=2 arriba de
+    _OBSERVATION_REQUIRED_KEYS_V1. Si no calza con NINGUNO de los dos,
+    es un formato genuinamente desconocido."""
+    if "demand" in row:
+        return row["demand"]
+    if "measurement" in row:
+        measurement = row["measurement"]
+        if not isinstance(measurement, dict) or not _MEASUREMENT_REQUIRED_KEYS.issubset(measurement.keys()):
+            raise SchemaDriftError(_describe_mismatch(f"{label} (measurement)", measurement if isinstance(measurement, dict) else {}, _MEASUREMENT_REQUIRED_KEYS))
+        return measurement["value"]
+    raise SchemaDriftError(_describe_mismatch(label, row, _OBSERVATION_REQUIRED_KEYS_V1 | {"measurement"}))
+
+
+def _coerce_demand_number(raw, label, row):
+    if isinstance(raw, bool):
+        raw = None
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            raw = None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    raise SchemaDriftError(
+        f"{label}: la demanda no es numérica ni un string numérico en esta fila (tipo {type(raw).__name__}) — "
+        f"fila: {json.dumps(row, default=str)[:500]}"
+    )
+
+
+_OBSERVATION_BASE_KEYS = {"station_id", "observed_at"}
+
+
 def validate_observations(rows):
     label = "observaciones (/v1/observations o /v1/stream/observations)"
-    _check_required_keys(label, rows, _OBSERVATION_REQUIRED_KEYS)
+    _check_required_keys(label, rows, _OBSERVATION_BASE_KEYS)
     for row in rows:
-        demand = row.get("demand")
-        if not isinstance(demand, (int, float)) or isinstance(demand, bool):
-            raise SchemaDriftError(
-                f"{label}: 'demand' no es numérico en esta fila (tipo {type(demand).__name__}) — "
-                f"fila: {json.dumps(row, default=str)[:500]}"
-            )
+        demand = _coerce_demand_number(_extract_demand(row, label), label, row)
         if demand < 0 or demand > _DEMAND_SANITY_MAX:
             raise SchemaDriftError(
-                f"{label}: 'demand'={demand} está muy fuera de lo plausible (rango sano: 0-{_DEMAND_SANITY_MAX}) — "
+                f"{label}: demanda={demand} está muy fuera de lo plausible (rango sano: 0-{_DEMAND_SANITY_MAX}) — "
                 "esto huele a cambio de unidad/escala, no a drift real de demanda. "
                 f"fila: {json.dumps(row, default=str)[:500]}"
             )
+
+
+def normalize_observation(row):
+    """Convierte una fila cruda del API (formato viejo o nuevo, ver
+    _extract_demand) a la forma plana {station_id, observed_at, demand}
+    que usa el resto del pipeline (Supabase, features.py, train.py) —
+    el único lugar que necesita saber que measurement.value existe."""
+    label = "observaciones (/v1/observations o /v1/stream/observations)"
+    demand = _coerce_demand_number(_extract_demand(row, label), label, row)
+    return {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": demand}
 
 
 _ISSUE_TITLE = "Cambio de formato detectado en el API del profesor"

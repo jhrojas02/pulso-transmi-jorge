@@ -35,7 +35,7 @@ import pandas as pd
 from src import supabase_client as sb
 from src.features import climatological_context, estimate_context_row
 from src.http_retry import request_with_retry
-from src.schema_guard import SchemaDriftError, report_schema_drift, validate_observations
+from src.schema_guard import SchemaDriftError, normalize_observation, report_schema_drift, validate_observations
 
 API_BASE = os.environ.get("PULSO_API_BASE", "https://pulso-transmi.72-60-245-2.sslip.io")
 SOURCE = "observations_stream"
@@ -141,10 +141,12 @@ def sync_observations_from_saved_cursor():
 
         if new_rows:
             _ensure_context_for({row["observed_at"] for row in new_rows})
-            payload = [
-                {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": row["demand"]}
-                for row in new_rows
-            ]
+            # normalize_observation (ver schema_guard.py) traduce el formato
+            # crudo del API (viejo "demand" plano, o el nuevo
+            # measurement.value en string desde schema_version=2,
+            # confirmado en producción 2026-10-04) a la forma plana que
+            # espera Supabase — un solo lugar sabe que measurement existe.
+            payload = [normalize_observation(row) for row in new_rows]
             sb.write("observacion", payload, on_conflict="station_id,observed_at", merge=False)
             total += len(payload)
             known_max = max(pd.Timestamp(row["observed_at"]) for row in new_rows)
