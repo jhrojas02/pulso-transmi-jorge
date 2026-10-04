@@ -158,10 +158,15 @@ def normalize_observation(row):
     """Convierte una fila cruda del API (formato viejo o nuevo, ver
     _extract_demand) a la forma plana {station_id, observed_at, demand}
     que usa el resto del pipeline (Supabase, features.py, train.py) —
-    el único lugar que necesita saber que measurement.value existe."""
+    el único lugar que necesita saber que measurement.value existe.
+
+    demand se redondea a entero: measurement.value llega como string con
+    decimales (ej. "546.00", confirmado en producción 2026-10-04), pero
+    `observacion.demand` es `integer` en el esquema (supabase/schema.sql)
+    — un float sin redondear ahí tira 400 Bad Request al escribir."""
     label = "observaciones (/v1/observations o /v1/stream/observations)"
     demand = _coerce_demand_number(_extract_demand(row, label), label, row)
-    return {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": demand}
+    return {"station_id": row["station_id"], "observed_at": row["observed_at"], "demand": int(round(demand))}
 
 
 _ISSUE_TITLE = "Cambio de formato detectado en el API del profesor"
